@@ -221,6 +221,20 @@ export default function PlannerPage() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [restoredPlannerStateKey, setRestoredPlannerStateKey] = useState<string | null>(null);
 
+  const resolveLatestCompanySettings = useCallback(async (): Promise<CompanySettings | null> => {
+    try {
+      const latestSettings = await companySettingsRepository.get();
+      if (latestSettings) {
+        setCompanySettings(latestSettings);
+        return latestSettings;
+      }
+    } catch {
+      // Falls der Reload fehlschlägt, mit bereits geladenen Einstellungen weiterarbeiten.
+    }
+
+    return companySettings;
+  }, [companySettings]);
+
   useEffect(() => {
     let isMounted = true;
     const loadProjectContext = async () => {
@@ -377,13 +391,15 @@ export default function PlannerPage() {
   }, [companySettings]);
 
   const handleSelectServiceType = useCallback(
-    (type: QuoteServiceType, forceReload = false) => {
+    async (type: QuoteServiceType, forceReload = false) => {
       const isSwitchingType = serviceType !== type;
+      const latestSettings = await resolveLatestCompanySettings();
+      const pricingTemplates = latestSettings?.pricingTemplates ?? companySettings?.pricingTemplates;
+      const runtimeMonths = getDefaultRuntimeMonths(latestSettings?.standardRuntimeMonths ?? companySettings?.standardRuntimeMonths);
       setServiceType(type);
       setIsManualPricingOpen(false);
       setContractTermMode("until_revocation");
       setServiceHoursInput("");
-      const runtimeMonths = getDefaultRuntimeMonths(companySettings?.standardRuntimeMonths);
       setDurationMonths(runtimeMonths);
 
       if (isSwitchingType) {
@@ -413,7 +429,7 @@ export default function PlannerPage() {
         }
 
         return enforceMonthlyRecurringLineItems(
-          getDefaultLineItemsForServiceType(type, companySettings?.pricingTemplates)
+          getDefaultLineItemsForServiceType(type, pricingTemplates)
         );
       });
 
@@ -422,7 +438,7 @@ export default function PlannerPage() {
           buildDefaultOfferText({
             serviceType: type,
             customer: activeCustomer,
-            companySettings,
+            companySettings: latestSettings ?? companySettings,
             signatureName: signatureDisplayName,
             project: activeProject,
             durationLabel: `${runtimeMonths} Monate`,
@@ -436,18 +452,21 @@ export default function PlannerPage() {
       companySettings,
       companySettings?.pricingTemplates,
       companySettings?.standardRuntimeMonths,
+      resolveLatestCompanySettings,
       serviceType,
       signatureDisplayName,
     ]
   );
 
-  const handleQuickOfferStart = useCallback(() => {
+  const handleQuickOfferStart = useCallback(async () => {
     const selectedTemplate = getQuickTemplateById(quickTemplateId);
     if (!selectedTemplate || selectedTemplate.serviceType !== quickServiceType) {
       setErrorMessage("Bitte eine gültige Template-Auswahl treffen.");
       return;
     }
 
+    const latestSettings = await resolveLatestCompanySettings();
+    const pricingTemplates = latestSettings?.pricingTemplates ?? companySettings?.pricingTemplates;
     setErrorMessage(null);
     setServiceType(selectedTemplate.serviceType);
     setIsManualPricingOpen(false);
@@ -455,25 +474,25 @@ export default function PlannerPage() {
     setServiceHoursInput("");
     const quickDurationMonths = Math.max(
       1,
-      Number(companySettings?.standardRuntimeMonths ?? selectedTemplate.defaultDurationMonths ?? 1)
+      Number(latestSettings?.standardRuntimeMonths ?? companySettings?.standardRuntimeMonths ?? selectedTemplate.defaultDurationMonths ?? 1)
     );
     setDurationMonths(quickDurationMonths);
     setQuoteLineItems(
       enforceMonthlyRecurringLineItems(
-        getLineItemsForQuickTemplate(selectedTemplate.id, companySettings?.pricingTemplates)
+        getLineItemsForQuickTemplate(selectedTemplate.id, pricingTemplates)
       )
     );
     setGeneratedText(
       buildDefaultOfferText({
         serviceType: selectedTemplate.serviceType,
         customer: activeCustomer,
-        companySettings,
+        companySettings: latestSettings ?? companySettings,
         signatureName: signatureDisplayName,
         project: activeProject,
         durationLabel: `${quickDurationMonths} Monate`,
       })
     );
-    setConceptText((prev) => (prev.trim().length > 0 ? prev : companySettings?.closingText ?? ""));
+    setConceptText((prev) => (prev.trim().length > 0 ? prev : latestSettings?.closingText ?? companySettings?.closingText ?? ""));
 
     if (selectedTemplate.serviceType === "baustellenueberwachung") {
       const fallbackTemplateId =
@@ -513,6 +532,7 @@ export default function PlannerPage() {
     activeProject,
     signatureDisplayName,
     towerTemplatesCatalog,
+    resolveLatestCompanySettings,
   ]);
 
   const isVideotowerService = serviceType === "baustellenueberwachung";

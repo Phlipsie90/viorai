@@ -232,8 +232,8 @@ async function loadFonts(pdf: PDFDocument): Promise<{ font: PDFFont; fontBold: P
       loadPdfFontResource(PDF_FONT_BOLD_PATH),
     ]);
 
-    const font = await pdf.embedFont(regular, { subset: false });
-    const fontBold = await pdf.embedFont(bold, { subset: false });
+    const font = await pdf.embedFont(regular);
+    const fontBold = await pdf.embedFont(bold);
     return { font, fontBold };
   } catch (error) {
     // Fallback only for resiliency when custom fonts are unavailable in runtime.
