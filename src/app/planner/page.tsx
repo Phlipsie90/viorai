@@ -202,6 +202,7 @@ export default function PlannerPage() {
   const [serviceType, setServiceType] = useState<QuoteServiceType | null>(null);
   const [quickServiceType, setQuickServiceType] = useState<QuoteServiceType>("objektschutz");
   const [quickTemplateId, setQuickTemplateId] = useState<QuoteQuickTemplateId>("objektschutz_standard");
+  const [isQuickOfferStarted, setIsQuickOfferStarted] = useState(false);
   const [quoteLineItems, setQuoteLineItems] = useState<QuoteLineItem[]>([]);
   const [generatedText, setGeneratedText] = useState("");
   const [conceptText, setConceptText] = useState("");
@@ -397,6 +398,7 @@ export default function PlannerPage() {
       const pricingTemplates = latestSettings?.pricingTemplates ?? companySettings?.pricingTemplates;
       const runtimeMonths = getDefaultRuntimeMonths(latestSettings?.standardRuntimeMonths ?? companySettings?.standardRuntimeMonths);
       setServiceType(type);
+      setIsQuickOfferStarted(false);
       setIsManualPricingOpen(false);
       setContractTermMode("until_revocation");
       setServiceHoursInput("");
@@ -468,6 +470,7 @@ export default function PlannerPage() {
     const latestSettings = await resolveLatestCompanySettings();
     const pricingTemplates = latestSettings?.pricingTemplates ?? companySettings?.pricingTemplates;
     setErrorMessage(null);
+    setIsQuickOfferStarted(true);
     setServiceType(selectedTemplate.serviceType);
     setIsManualPricingOpen(false);
     setContractTermMode("until_revocation");
@@ -534,6 +537,27 @@ export default function PlannerPage() {
     towerTemplatesCatalog,
     resolveLatestCompanySettings,
   ]);
+
+  useEffect(() => {
+    if (!isQuickOfferStarted) {
+      return;
+    }
+
+    if (!serviceType || serviceType !== quickServiceType) {
+      return;
+    }
+
+    const selectedTemplate = getQuickTemplateById(quickTemplateId);
+    if (!selectedTemplate || selectedTemplate.serviceType !== serviceType) {
+      return;
+    }
+
+    setQuoteLineItems(
+      enforceMonthlyRecurringLineItems(
+        getLineItemsForQuickTemplate(selectedTemplate.id, companySettings?.pricingTemplates)
+      )
+    );
+  }, [companySettings?.pricingTemplates, isQuickOfferStarted, quickServiceType, quickTemplateId, serviceType]);
 
   const isVideotowerService = serviceType === "baustellenueberwachung";
 
@@ -1449,34 +1473,62 @@ export default function PlannerPage() {
       const recurringTotal = quoteTotals.lineItems
         .filter((item) => item.billingMode === "recurring")
         .reduce((sum, item) => sum + item.totalPrice, 0);
-      return roundMoney(recurringTotal / Math.max(1, billingDaysPerMonth));
+      const divisor = Math.max(1, serviceInputValue || billingDaysPerMonth);
+      return roundMoney(recurringTotal / divisor);
     }
 
     const guardItem = quoteTotals.lineItems.find(
       (item) => item.type === "guard_hour" && item.billingMode === "recurring"
     );
     return guardItem?.unitPrice ?? 0;
-  }, [billingDaysPerMonth, quoteTotals.lineItems, serviceType]);
+  }, [billingDaysPerMonth, quoteTotals.lineItems, serviceInputValue, serviceType]);
 
   const previewDailyPrice = useMemo(() => {
     if (serviceType === "leitstelle") {
       return previewUnitRate;
     }
-    if (serviceType === "baustellenueberwachung") {
+    if (serviceType === "baustellenueberwachung" || serviceType === "revierdienst") {
       return previewUnitRate;
     }
     return roundMoney(serviceInputValue * previewUnitRate);
   }, [previewUnitRate, serviceInputValue, serviceType]);
 
   const previewMonthlyPrice = useMemo(() => {
-    if (serviceType === "leitstelle") {
-      return roundMoney(serviceInputValue * previewUnitRate);
+    return quoteTotals.monthlyTotal;
+  }, [quoteTotals.monthlyTotal]);
+
+  const missingPricingHint = useMemo(() => {
+    if (!serviceType) {
+      return null;
+    }
+
+    const recurringItems = quoteTotals.lineItems.filter((item) => item.billingMode === "recurring");
+    if (recurringItems.length === 0) {
+      return "Keine Standardpreise für wiederkehrende Positionen gefunden.";
+    }
+
+    const hasRecurringPrice = recurringItems.some((item) =>
+      serviceType === "revierdienst"
+        ? Math.max(0, Number(item.preisProKontrolle ?? item.unitPrice)) > 0
+        : Math.max(0, Number(item.unitPrice)) > 0
+    );
+
+    if (hasRecurringPrice) {
+      return null;
+    }
+
+    if (serviceType === "revierdienst") {
+      return "Kein Standardpreis pro Kontrolle gefunden.";
     }
     if (serviceType === "baustellenueberwachung") {
-      return roundMoney(serviceInputValue * previewUnitRate);
+      return "Kein Standardpreis pro Tag gefunden.";
     }
-    return roundMoney(previewDailyPrice * billingDaysPerMonth);
-  }, [billingDaysPerMonth, previewDailyPrice, previewUnitRate, serviceInputValue, serviceType]);
+    if (serviceType === "leitstelle") {
+      return "Kein Standardpreis pro Aufschaltung gefunden.";
+    }
+
+    return "Kein Standardpreis pro Stunde gefunden.";
+  }, [quoteTotals.lineItems, serviceType]);
 
   const offerPreviewFacts = useMemo(() => {
     if (!serviceType) {
@@ -1713,71 +1765,29 @@ export default function PlannerPage() {
 
   const handleServiceHoursInputChange = useCallback((rawValue: string) => {
     setServiceHoursInput(rawValue);
+  }, []);
 
-    const parsedHours = parseHourInputValue(rawValue);
-    if (!Number.isFinite(parsedHours) || parsedHours <= 0) {
+  useEffect(() => {
+    if (!serviceType) {
       return;
     }
 
     setQuoteLineItems((prev) => {
-      if (!isHourBasedServiceType(serviceType)) {
+      const resolvedServiceInputValue = serviceInputValue > 0
+        ? serviceInputValue
+        : deriveServiceInputValueFromLineItems(prev, serviceType);
+
+      if (resolvedServiceInputValue <= 0) {
         return prev;
       }
 
-      const firstGuardIndex = prev.findIndex(
-        (item) => item.type === "guard_hour" && item.billingMode === "recurring"
-      );
-
-      if (firstGuardIndex < 0) {
-        return prev;
-      }
-
-      return prev.map((item, index) => {
-        if (item.type !== "guard_hour" || item.billingMode !== "recurring") {
-          return item;
-        }
-
-        if (index !== firstGuardIndex) {
-          return {
-            ...item,
-            stundenProTag: 0,
-            nachtStundenProTag: 0,
-            tageWerktage: billingDaysPerMonth,
-            tageSamstag: 0,
-            tageSonntag: 0,
-            tageFeiertag: 0,
-          };
-        }
-
-        return {
-          ...item,
-          stundenProTag: parsedHours,
-          nachtStundenProTag: 0,
-          tageWerktage: billingDaysPerMonth,
-          tageSamstag: 0,
-          tageSonntag: 0,
-          tageFeiertag: 0,
-          billingMode: "recurring",
-          interval: "monthly",
-        };
+      return synchronizePreviewInputsWithLineItems(prev, {
+        serviceType,
+        serviceInputValue: resolvedServiceInputValue,
+        billingDaysPerMonth,
       });
     });
-  }, [billingDaysPerMonth, serviceType]);
-
-  useEffect(() => {
-    if (serviceHoursInput.trim().length === 0) {
-      return;
-    }
-    if (!isHourBasedServiceType(serviceType)) {
-      return;
-    }
-
-    setQuoteLineItems((prev) => prev.map((item) => (
-      item.type === "guard_hour" && item.billingMode === "recurring"
-        ? { ...item, tageWerktage: billingDaysPerMonth }
-        : item
-    )));
-  }, [billingDaysPerMonth, serviceHoursInput, serviceType]);
+  }, [billingDaysPerMonth, serviceInputValue, serviceType]);
 
   const saveCurrentQuote = useCallback(async (): Promise<StoredQuote> => {
     if (!activeProject || !activeCustomer) {
@@ -2226,7 +2236,7 @@ export default function PlannerPage() {
             <button
               key={value}
               type="button"
-              onClick={() => handleSelectServiceType(value)}
+              onClick={() => void handleSelectServiceType(value)}
               className={`rounded-xl px-4 py-2 text-sm font-medium transition-colors ${
                 serviceType === value
                   ? "bg-slate-900 text-white"
@@ -2297,25 +2307,32 @@ export default function PlannerPage() {
             <div className="rounded-xl bg-slate-50 border border-slate-200 px-3 py-2">
               <p className="text-xs text-slate-500">
                 {serviceType === "revierdienst"
-                  ? "Preis / Tag"
+                  ? "Preis / Kontrolle"
                   : serviceType === "leitstelle"
                     ? "Preis / Aufschaltung"
-                    : "Preis / Tag"}
+                    : serviceType === "baustellenueberwachung"
+                      ? "Preis / Tag"
+                      : "Preis / Stunde"}
               </p>
               <p className="text-sm font-semibold text-slate-800">
-                {previewUnitRate > 0 ? `${previewDailyPrice.toFixed(2)} EUR` : "-"}
+                {previewUnitRate > 0 ? `${previewDailyPrice.toFixed(2)} EUR` : "–"}
               </p>
             </div>
             <div className="rounded-xl bg-slate-900 border border-slate-900 px-3 py-2">
               <p className="text-xs text-slate-300">Preis / Monat</p>
               <p className="text-sm font-semibold text-white">
-                {previewUnitRate > 0 ? `${previewMonthlyPrice.toFixed(2)} EUR` : "-"}
+                {previewMonthlyPrice > 0 ? `${previewMonthlyPrice.toFixed(2)} EUR` : "–"}
               </p>
               {serviceType !== "leitstelle" && (
                 <p className="text-xs text-slate-300/80">{billingDaysPerMonth} Tage/Monat</p>
               )}
             </div>
           </div>
+          {missingPricingHint && (
+            <p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+              {missingPricingHint}
+            </p>
+          )}
         </section>
       )}
 
@@ -2706,13 +2723,18 @@ export default function PlannerPage() {
               <p className="text-xl font-semibold text-white">{quoteTotals.totalGross.toFixed(2)} EUR</p>
             </div>
           </div>
+          {missingPricingHint && (
+            <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+              {missingPricingHint}
+            </p>
+          )}
 
           {isManualPricingOpen && (
             <>
               <div className="flex items-center gap-2">
               <button
                 type="button"
-                onClick={() => handleSelectServiceType(serviceType, true)}
+                onClick={() => void handleSelectServiceType(serviceType, true)}
                 className="px-3 py-2 rounded text-sm bg-slate-100 text-slate-700 hover:bg-slate-200"
               >
                 Standardpositionen zurücksetzen
@@ -4304,6 +4326,144 @@ function calculatePersonnelBreakdown(item: QuoteLineItem): {
     dailyNightPrice,
     monthlyPrice,
   };
+}
+
+function deriveServiceInputValueFromLineItems(
+  items: QuoteLineItem[],
+  serviceType: QuoteServiceType
+): number {
+  if (serviceType === "revierdienst") {
+    const controlItem = items.find((item) => item.type === "control_run" && item.billingMode === "recurring");
+    return Math.max(0, Number(controlItem?.kontrollenProTagWerktag ?? 0));
+  }
+
+  if (serviceType === "leitstelle") {
+    const serviceItem = items.find((item) => item.type === "service" && item.billingMode === "recurring");
+    return Math.max(0, Number(serviceItem?.quantity ?? 0));
+  }
+
+  if (serviceType === "baustellenueberwachung") {
+    const recurringItem = items.find((item) => item.billingMode === "recurring");
+    return Math.max(0, Number(recurringItem?.quantity ?? 0));
+  }
+
+  if (isHourBasedServiceType(serviceType)) {
+    const guardItem = items.find((item) => item.type === "guard_hour" && item.billingMode === "recurring");
+    return Math.max(0, Number(guardItem?.stundenProTag ?? 0));
+  }
+
+  return 0;
+}
+
+function synchronizePreviewInputsWithLineItems(
+  items: QuoteLineItem[],
+  input: {
+    serviceType: QuoteServiceType;
+    serviceInputValue: number;
+    billingDaysPerMonth: number;
+  }
+): QuoteLineItem[] {
+  const value = Math.max(0, input.serviceInputValue);
+  const days = Math.max(1, input.billingDaysPerMonth);
+  let hasChanges = false;
+
+  const nextItems = items.map((item, index) => {
+    if (input.serviceType === "revierdienst" && item.type === "control_run" && item.billingMode === "recurring") {
+      const nextItem = {
+        ...item,
+        kontrollenProTagWerktag: value,
+        kontrollenProTagSamstag: value,
+        kontrollenProTagSonntag: value,
+        kontrollenProTagFeiertag: value,
+        tageWerktage: days,
+      };
+      if (
+        nextItem.kontrollenProTagWerktag !== item.kontrollenProTagWerktag
+        || nextItem.kontrollenProTagSamstag !== item.kontrollenProTagSamstag
+        || nextItem.kontrollenProTagSonntag !== item.kontrollenProTagSonntag
+        || nextItem.kontrollenProTagFeiertag !== item.kontrollenProTagFeiertag
+        || nextItem.tageWerktage !== item.tageWerktage
+      ) {
+        hasChanges = true;
+      }
+      return nextItem;
+    }
+
+    if (input.serviceType === "leitstelle" && item.type === "service" && item.billingMode === "recurring") {
+      if (index === items.findIndex((entry) => entry.type === "service" && entry.billingMode === "recurring")) {
+        if (item.quantity !== value) {
+          hasChanges = true;
+        }
+        return {
+          ...item,
+          quantity: value,
+        };
+      }
+    }
+
+    if (input.serviceType === "baustellenueberwachung" && item.billingMode === "recurring") {
+      const nextQuantity = roundMoney(value / days);
+      if (item.quantity !== nextQuantity) {
+        hasChanges = true;
+      }
+      return {
+        ...item,
+        quantity: nextQuantity,
+      };
+    }
+
+    if (isHourBasedServiceType(input.serviceType) && item.type === "guard_hour" && item.billingMode === "recurring") {
+      if (index === items.findIndex((entry) => entry.type === "guard_hour" && entry.billingMode === "recurring")) {
+        const nextPrimary = {
+          ...item,
+          stundenProTag: value,
+          nachtStundenProTag: 0,
+          tageWerktage: days,
+          tageSamstag: 0,
+          tageSonntag: 0,
+          tageFeiertag: 0,
+          interval: "monthly" as const,
+        };
+        if (
+          nextPrimary.stundenProTag !== item.stundenProTag
+          || nextPrimary.nachtStundenProTag !== item.nachtStundenProTag
+          || nextPrimary.tageWerktage !== item.tageWerktage
+          || nextPrimary.tageSamstag !== item.tageSamstag
+          || nextPrimary.tageSonntag !== item.tageSonntag
+          || nextPrimary.tageFeiertag !== item.tageFeiertag
+          || nextPrimary.interval !== item.interval
+        ) {
+          hasChanges = true;
+        }
+        return nextPrimary;
+      }
+
+      const nextSecondary = {
+        ...item,
+        stundenProTag: 0,
+        nachtStundenProTag: 0,
+        tageWerktage: days,
+        tageSamstag: 0,
+        tageSonntag: 0,
+        tageFeiertag: 0,
+      };
+      if (
+        nextSecondary.stundenProTag !== item.stundenProTag
+        || nextSecondary.nachtStundenProTag !== item.nachtStundenProTag
+        || nextSecondary.tageWerktage !== item.tageWerktage
+        || nextSecondary.tageSamstag !== item.tageSamstag
+        || nextSecondary.tageSonntag !== item.tageSonntag
+        || nextSecondary.tageFeiertag !== item.tageFeiertag
+      ) {
+        hasChanges = true;
+      }
+      return nextSecondary;
+    }
+
+    return item;
+  });
+
+  return hasChanges ? nextItems : items;
 }
 
 function roundMoney(value: number): number {
