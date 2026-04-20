@@ -1,5 +1,5 @@
 import fontkit from "@pdf-lib/fontkit";
-import { PDFDocument, type PDFFont, type PDFImage, type PDFPage, rgb } from "pdf-lib";
+import { PDFDocument, StandardFonts, type PDFFont, type PDFImage, type PDFPage, rgb } from "pdf-lib";
 import type { QuoteLineItem } from "@/types";
 import { localCustomerRepository } from "@/features/customers/repository";
 import { companySettingsRepository } from "@/features/company-settings/repository";
@@ -29,6 +29,8 @@ const COLOR_TEXT = rgb(0.12, 0.15, 0.2);
 const COLOR_MUTED = rgb(0.36, 0.4, 0.47);
 const COLOR_LINE = rgb(0.78, 0.81, 0.86);
 const COLOR_HEADER_BG = rgb(0.95, 0.96, 0.98);
+const PDF_FONT_REGULAR_PATH = "fonts/source-sans-3-regular.woff";
+const PDF_FONT_BOLD_PATH = "fonts/source-sans-3-bold.woff";
 
 interface DocumentRuntime {
   pdf: PDFDocument;
@@ -224,16 +226,28 @@ function ensureSpace(runtime: DocumentRuntime, requiredHeight: number, company: 
 }
 
 async function loadFonts(pdf: PDFDocument): Promise<{ font: PDFFont; fontBold: PDFFont }> {
-  const regular = await loadBinaryResource("/fonts/arial.ttf");
-  const bold = await loadBinaryResource("/fonts/arial-bold.ttf");
+  try {
+    const [regular, bold] = await Promise.all([
+      loadPdfFontResource(PDF_FONT_REGULAR_PATH),
+      loadPdfFontResource(PDF_FONT_BOLD_PATH),
+    ]);
 
-  if (!regular || !bold) {
-    throw new Error("PDF fonts could not be loaded.");
+    const font = await pdf.embedFont(regular, { subset: false });
+    const fontBold = await pdf.embedFont(bold, { subset: false });
+    return { font, fontBold };
+  } catch (error) {
+    // Fallback only for resiliency when custom fonts are unavailable in runtime.
+    const message = error instanceof Error ? error.message : "Unbekannter Font-Fehler.";
+    console.error("[PDF] Custom fonts could not be loaded. Falling back to StandardFonts.", {
+      regularPath: PDF_FONT_REGULAR_PATH,
+      boldPath: PDF_FONT_BOLD_PATH,
+      error: message,
+    });
+
+    const font = await pdf.embedFont(StandardFonts.Helvetica);
+    const fontBold = await pdf.embedFont(StandardFonts.HelveticaBold);
+    return { font, fontBold };
   }
-
-  const font = await pdf.embedFont(regular, { subset: false });
-  const fontBold = await pdf.embedFont(bold, { subset: false });
-  return { font, fontBold };
 }
 
 function drawHeader(
@@ -775,6 +789,7 @@ function drawSectionTitle(runtime: DocumentRuntime, title: string, company: Comp
 function drawPageFooter(page: PDFPage, pageNumber: number, font: PDFFont, company: CompanyBranding): void {
   const footerTop = FOOTER_HEIGHT;
   const footerTextTop = footerTop + 6;
+  const copyrightText = buildCopyrightFooterText(company);
 
   page.drawLine({
     start: { x: MARGIN_LEFT, y: footerTop + 16 },
@@ -790,6 +805,21 @@ function drawPageFooter(page: PDFPage, pageNumber: number, font: PDFFont, compan
   }
 
   drawRightAlignedText(page, `Seite ${pageNumber}`, A4_WIDTH - MARGIN_RIGHT, footerTop + 6, 8, font, COLOR_MUTED);
+
+  const copyrightWidth = font.widthOfTextAtSize(normalizePdfText(copyrightText), 8);
+  const centeredX = (A4_WIDTH - copyrightWidth) / 2;
+  drawText(page, copyrightText, centeredX, 16, 8, font, rgb(0.45, 0.48, 0.53));
+}
+
+function buildCopyrightFooterText(company: CompanyBranding): string {
+  const year = new Date().getFullYear();
+  const companyName = (company.companyName || "").trim();
+
+  if (companyName.length > 0) {
+    return `© ${year} ViorAI (Phillipp Reiß) – ${companyName} – Alle Rechte vorbehalten`;
+  }
+
+  return `© ${year} ViorAI (Phillipp Reiß) – Alle Rechte vorbehalten`;
 }
 
 function drawKeyValue(
@@ -1298,23 +1328,33 @@ function decodeDataUrl(dataUrl: string): { mime: string; bytes: Uint8Array } {
   return { mime, bytes };
 }
 
-async function loadBinaryResource(path: string): Promise<Uint8Array | null> {
-  try {
-    if (typeof window === "undefined") {
-      const [{ readFile }, nodePath] = await Promise.all([import("node:fs/promises"), import("node:path")]);
-      const absolutePath = nodePath.join(process.cwd(), "public", path.replace(/^\/+/, "").replace(/\//g, nodePath.sep));
+async function loadPdfFontResource(publicRelativePath: string): Promise<Uint8Array> {
+  const normalizedPath = publicRelativePath.replace(/^\/+/, "");
+
+  if (typeof window === "undefined") {
+    const [{ readFile }, nodePath] = await Promise.all([import("node:fs/promises"), import("node:path")]);
+    const absolutePath = nodePath.join(process.cwd(), "public", ...normalizedPath.split("/"));
+
+    try {
       return new Uint8Array(await readFile(absolutePath));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error("[PDF] Font file could not be read from filesystem.", {
+        requestedPath: publicRelativePath,
+        absolutePath,
+        error: message,
+      });
+      throw new Error(`PDF font file missing or unreadable: ${absolutePath}`);
     }
-
-    const response = await fetch(path);
-    if (!response.ok) {
-      return null;
-    }
-
-    return new Uint8Array(await response.arrayBuffer());
-  } catch {
-    return null;
   }
+
+  const browserPath = `/${normalizedPath}`;
+  const response = await fetch(browserPath);
+  if (!response.ok) {
+    throw new Error(`PDF font file could not be fetched in browser runtime: ${browserPath} (status ${response.status})`);
+  }
+
+  return new Uint8Array(await response.arrayBuffer());
 }
 
 function parseHexColor(value: string | undefined, fallback: ReturnType<typeof rgb>) {

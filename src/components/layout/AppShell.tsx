@@ -18,6 +18,7 @@ export default function AppShell({ children }: AppShellProps) {
   const [isChecking, setIsChecking] = useState(true);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [hasTenantContext, setHasTenantContext] = useState(false);
+  const currentYear = new Date().getFullYear();
 
   const isAuthRoute = pathname.startsWith("/auth");
 
@@ -162,6 +163,12 @@ export default function AppShell({ children }: AppShellProps) {
       <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
         <Topbar />
         <main className="flex-1 overflow-y-auto p-6 bg-[var(--surface-app)]">{children}</main>
+        <footer
+          className="border-t border-slate-200 bg-[var(--surface-app)] py-2 text-center text-xs text-slate-500/70"
+          title={`© ${currentYear} ViorAI – Angebotsplattform`}
+        >
+          © {currentYear} ViorAI
+        </footer>
       </div>
     </div>
   );

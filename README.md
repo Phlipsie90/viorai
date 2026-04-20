@@ -1,36 +1,75 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# ViorAI Angebotsplattform (CRM Tool)
 
-## Getting Started
+Bestehendes Next.js-Projekt für die Angebotserstellung im Sicherheitsumfeld (u. a. Objektschutz, Revierdienst, Videoturm).
 
-First, run the development server:
+## Lokaler Start
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+App lokal unter `http://localhost:3000`.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Build-Check
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```bash
+npm run build
+```
 
-## Learn More
+## Vercel Deployment (test.viorai.com)
 
-To learn more about Next.js, take a look at the following resources:
+Das Projekt ist als **eigenständige App** deploybar (separat von der Landingpage `viorai.com`).
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+### 1) Projekt in Vercel verbinden
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+1. Repository in Vercel importieren.
+2. Framework: Next.js (automatisch).
+3. Build Command: `npm run build` (Standard).
+4. Output: automatisch (kein Export-Modus nötig).
 
-## Deploy on Vercel
+### 2) Environment Variables setzen
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+Pflicht:
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- `NEXT_PUBLIC_SUPABASE_URL`
+- `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+- `SMTP_HOST`
+- `SMTP_PORT`
+- `SMTP_USER`
+- `SMTP_PASS`
+- `SMTP_FROM`
+- `DEEPSEEK_API_KEY`
+
+Optional:
+
+- `DEEPSEEK_MODEL` (Default: `deepseek-chat`)
+- `DEEPSEEK_API_URL` (Default: `https://api.deepseek.com/v1/chat/completions`)
+
+Hinweis: Keine Secrets im Frontend verwenden. SMTP/DeepSeek werden nur serverseitig in API-Routes genutzt.
+
+### 3) Domain konfigurieren
+
+In Vercel-Projekt:
+
+- Domain hinzufügen: `test.viorai.com`
+- DNS beim Provider setzen (CNAME/Alias auf Vercel)
+- SSL wird von Vercel automatisch bereitgestellt
+
+`viorai.com` bleibt bewusst ein separates Projekt.
+
+### 4) Funktionsstatus
+
+- API-Routes laufen auf Node-Runtime:
+  - `/api/quotes/send` (SMTP)
+  - `/api/ai/generate-offer-text` (DeepSeek)
+- PDF-Erzeugung nutzt serverseitiges Laden der Fonts über Dateisystem (`process.cwd()` + `public/fonts/...`) mit Fallback.
+
+## Schnelltest nach Deploy
+
+1. Login funktioniert.
+2. Dashboard lädt.
+3. Angebot speichern funktioniert.
+4. PDF herunterladen funktioniert.
+5. Angebot senden (SMTP) funktioniert.
+6. KI-Textgenerierung (DeepSeek) funktioniert.
