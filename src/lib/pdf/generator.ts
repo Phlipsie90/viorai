@@ -1,4 +1,3 @@
-import fontkit from "@pdf-lib/fontkit";
 import { PDFDocument, StandardFonts, type PDFFont, type PDFImage, type PDFPage, rgb } from "pdf-lib";
 import type { QuoteLineItem } from "@/types";
 import { localCustomerRepository } from "@/features/customers/repository";
@@ -29,8 +28,6 @@ const COLOR_TEXT = rgb(0.12, 0.15, 0.2);
 const COLOR_MUTED = rgb(0.36, 0.4, 0.47);
 const COLOR_LINE = rgb(0.78, 0.81, 0.86);
 const COLOR_HEADER_BG = rgb(0.95, 0.96, 0.98);
-const PDF_FONT_REGULAR_PATH = "fonts/source-sans-3-regular.woff";
-const PDF_FONT_BOLD_PATH = "fonts/source-sans-3-bold.woff";
 
 interface DocumentRuntime {
   pdf: PDFDocument;
@@ -138,7 +135,6 @@ export async function generateQuotePdf(payload: QuotePdfPayload): Promise<Uint8A
   const totals = calculatePdfTotals(payload);
 
   const pdf = await PDFDocument.create();
-  pdf.registerFontkit(fontkit);
 
   const { font, fontBold } = await loadFonts(pdf);
   pdf.setTitle(`Angebot ${payload.quoteNumber}`);
@@ -226,28 +222,9 @@ function ensureSpace(runtime: DocumentRuntime, requiredHeight: number, company: 
 }
 
 async function loadFonts(pdf: PDFDocument): Promise<{ font: PDFFont; fontBold: PDFFont }> {
-  try {
-    const [regular, bold] = await Promise.all([
-      loadPdfFontResource(PDF_FONT_REGULAR_PATH),
-      loadPdfFontResource(PDF_FONT_BOLD_PATH),
-    ]);
-
-    const font = await pdf.embedFont(regular);
-    const fontBold = await pdf.embedFont(bold);
-    return { font, fontBold };
-  } catch (error) {
-    // Fallback only for resiliency when custom fonts are unavailable in runtime.
-    const message = error instanceof Error ? error.message : "Unbekannter Font-Fehler.";
-    console.error("[PDF] Custom fonts could not be loaded. Falling back to StandardFonts.", {
-      regularPath: PDF_FONT_REGULAR_PATH,
-      boldPath: PDF_FONT_BOLD_PATH,
-      error: message,
-    });
-
-    const font = await pdf.embedFont(StandardFonts.Helvetica);
-    const fontBold = await pdf.embedFont(StandardFonts.HelveticaBold);
-    return { font, fontBold };
-  }
+  const font = await pdf.embedFont(StandardFonts.Helvetica);
+  const fontBold = await pdf.embedFont(StandardFonts.HelveticaBold);
+  return { font, fontBold };
 }
 
 function drawHeader(
@@ -1326,35 +1303,6 @@ function decodeDataUrl(dataUrl: string): { mime: string; bytes: Uint8Array } {
   }
 
   return { mime, bytes };
-}
-
-async function loadPdfFontResource(publicRelativePath: string): Promise<Uint8Array> {
-  const normalizedPath = publicRelativePath.replace(/^\/+/, "");
-
-  if (typeof window === "undefined") {
-    const [{ readFile }, nodePath] = await Promise.all([import("node:fs/promises"), import("node:path")]);
-    const absolutePath = nodePath.join(process.cwd(), "public", ...normalizedPath.split("/"));
-
-    try {
-      return new Uint8Array(await readFile(absolutePath));
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      console.error("[PDF] Font file could not be read from filesystem.", {
-        requestedPath: publicRelativePath,
-        absolutePath,
-        error: message,
-      });
-      throw new Error(`PDF font file missing or unreadable: ${absolutePath}`);
-    }
-  }
-
-  const browserPath = `/${normalizedPath}`;
-  const response = await fetch(browserPath);
-  if (!response.ok) {
-    throw new Error(`PDF font file could not be fetched in browser runtime: ${browserPath} (status ${response.status})`);
-  }
-
-  return new Uint8Array(await response.arrayBuffer());
 }
 
 function parseHexColor(value: string | undefined, fallback: ReturnType<typeof rgb>) {
