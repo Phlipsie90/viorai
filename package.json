@@ -8,9 +8,18 @@
     "start": "next start"
   },
   "dependencies": {
+    "@fontsource/source-sans-3": "^5.2.9",
+    "@pdf-lib/fontkit": "^1.1.1",
+    "@supabase/supabase-js": "^2.57.4",
+    "@types/nodemailer": "^8.0.0",
+    "konva": "^10.2.3",
     "next": "16.2.3",
+    "nodemailer": "^8.0.5",
+    "pdf-lib": "^1.17.1",
+    "pdfjs-dist": "^5.6.205",
     "react": "19.2.4",
-    "react-dom": "19.2.4"
+    "react-dom": "19.2.4",
+    "react-konva": "^19.2.3"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
