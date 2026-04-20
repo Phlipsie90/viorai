@@ -165,9 +165,9 @@ export default function AppShell({ children }: AppShellProps) {
         <main className="flex-1 overflow-y-auto p-6 bg-[var(--surface-app)]">{children}</main>
         <footer
           className="border-t border-slate-200 bg-[var(--surface-app)] py-2 text-center text-xs text-slate-500/70"
-          title={`© ${currentYear} ViorAI – Angebotsplattform`}
+          title={`© ${currentYear} ViorAI (Phillipp Reiß) – Angebotsplattform`}
         >
-          © {currentYear} ViorAI
+          © {currentYear} ViorAI (Phillipp Reiß)
         </footer>
       </div>
     </div>
