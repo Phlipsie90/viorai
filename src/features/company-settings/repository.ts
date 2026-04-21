@@ -58,6 +58,21 @@ function isMissingColumnError(message?: string | null): boolean {
     || message.includes("Could not find the 'standard_runtime_months' column");
 }
 
+function isMissingPricingTemplatesColumnError(message?: string | null): boolean {
+  if (!message) {
+    return false;
+  }
+
+  return message.includes("company_settings.pricing_templates")
+    || message.includes("Could not find the 'pricing_templates' column");
+}
+
+function buildPricingTemplatesMigrationError(): Error {
+  return new Error(
+    "Die Datenbank-Migration für Standardpreise fehlt (Spalte company_settings.pricing_templates). Bitte Migration ausführen und erneut speichern."
+  );
+}
+
 function normalizeColor(value: string, fallback: string): string {
   const trimmed = value.trim();
   return /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(trimmed) ? trimmed : fallback;
@@ -268,6 +283,10 @@ export const companySettingsRepository = {
     data = primaryResult.data;
     error = primaryResult.error;
 
+    if (error && isMissingPricingTemplatesColumnError(error.message)) {
+      throw buildPricingTemplatesMigrationError();
+    }
+
     if (error && isMissingColumnError(error.message)) {
       const legacyResult = await supabase
         .from("company_settings")
@@ -306,6 +325,10 @@ export const companySettingsRepository = {
       .single();
     data = primaryResult.data;
     error = primaryResult.error;
+
+    if (error && isMissingPricingTemplatesColumnError(error.message)) {
+      throw buildPricingTemplatesMigrationError();
+    }
 
     if (error && isMissingColumnError(error.message)) {
       const legacyPayload = toLegacyPayload(draft);
@@ -350,6 +373,10 @@ export const companySettingsRepository = {
       .single();
     data = primaryResult.data;
     error = primaryResult.error;
+
+    if (error && isMissingPricingTemplatesColumnError(error.message)) {
+      throw buildPricingTemplatesMigrationError();
+    }
 
     if (error && isMissingColumnError(error.message)) {
       const legacyPayload = toLegacyPayload(draft);
