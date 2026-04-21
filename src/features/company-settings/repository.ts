@@ -18,19 +18,21 @@ interface CompanySettingsRow {
   phone: string | null;
   website: string | null;
   payment_terms: string | null;
-  standard_runtime_months: number | null;
+  standard_runtime_months?: number | null;
   vat_rate: number | null;
   currency: string | null;
   intro_text: string | null;
   closing_text: string | null;
-  primary_color: string | null;
-  secondary_color: string | null;
-  pricing_templates: unknown;
+  primary_color?: string | null;
+  secondary_color?: string | null;
+  pricing_templates?: unknown;
   created_at: string;
   updated_at: string;
 }
 const COMPANY_SETTINGS_SELECT_COLUMNS =
   "id, tenant_id, company_name, logo_url, letterhead, footer, address, contact_person, email, phone, website, payment_terms, standard_runtime_months, vat_rate, currency, intro_text, closing_text, primary_color, secondary_color, pricing_templates, created_at, updated_at";
+const COMPANY_SETTINGS_SELECT_COLUMNS_PRICING_COMPAT =
+  "id, tenant_id, company_name, logo_url, letterhead, footer, address, contact_person, email, phone, website, payment_terms, vat_rate, currency, intro_text, closing_text, pricing_templates, created_at, updated_at";
 const COMPANY_SETTINGS_SELECT_COLUMNS_LEGACY =
   "id, tenant_id, company_name, logo_url, letterhead, footer, address, contact_person, email, phone, website, payment_terms, vat_rate, currency, intro_text, closing_text, created_at, updated_at";
 
@@ -71,6 +73,14 @@ function buildPricingTemplatesMigrationError(): Error {
   return new Error(
     "Die Datenbank-Migration für Standardpreise fehlt (Spalte company_settings.pricing_templates). Bitte Migration ausführen und erneut speichern."
   );
+}
+
+function logCompanySettingsDebug(stage: string, payload: Record<string, unknown>) {
+  if (process.env.NODE_ENV === "production") {
+    return;
+  }
+
+  console.log(`[company-settings] ${stage}`, payload);
 }
 
 function normalizeColor(value: string, fallback: string): string {
@@ -268,10 +278,33 @@ function toLegacyPayload(draft: CompanySettingsDraft) {
   };
 }
 
+function toPricingCompatPayload(draft: CompanySettingsDraft) {
+  const payload = toPayload(draft);
+
+  return {
+    company_name: payload.company_name,
+    logo_url: payload.logo_url,
+    letterhead: payload.letterhead,
+    footer: payload.footer,
+    address: payload.address,
+    contact_person: payload.contact_person,
+    email: payload.email,
+    phone: payload.phone,
+    website: payload.website,
+    payment_terms: payload.payment_terms,
+    vat_rate: payload.vat_rate,
+    currency: payload.currency,
+    intro_text: payload.intro_text,
+    closing_text: payload.closing_text,
+    pricing_templates: payload.pricing_templates,
+  };
+}
+
 export const companySettingsRepository = {
   async get(): Promise<CompanySettings | null> {
     const supabase = getSupabaseClient();
     const tenant = await resolveTenantContext(supabase);
+    logCompanySettingsDebug("get:start", { tenantId: tenant.tenantId });
     let data: unknown = null;
     let error: { message: string } | null = null;
 
@@ -282,9 +315,31 @@ export const companySettingsRepository = {
       .maybeSingle();
     data = primaryResult.data;
     error = primaryResult.error;
+    logCompanySettingsDebug("get:primary", {
+      tenantId: tenant.tenantId,
+      ok: !error,
+      error: error?.message ?? null,
+      hasData: !!data,
+    });
 
     if (error && isMissingPricingTemplatesColumnError(error.message)) {
       throw buildPricingTemplatesMigrationError();
+    }
+
+    if (error && isMissingColumnError(error.message)) {
+      const pricingCompatResult = await supabase
+        .from("company_settings")
+        .select(COMPANY_SETTINGS_SELECT_COLUMNS_PRICING_COMPAT)
+        .eq("tenant_id", tenant.tenantId)
+        .maybeSingle();
+      data = pricingCompatResult.data;
+      error = pricingCompatResult.error;
+      logCompanySettingsDebug("get:pricing-compat", {
+        tenantId: tenant.tenantId,
+        ok: !error,
+        error: error?.message ?? null,
+        hasData: !!data,
+      });
     }
 
     if (error && isMissingColumnError(error.message)) {
@@ -295,6 +350,12 @@ export const companySettingsRepository = {
         .maybeSingle();
       data = legacyResult.data;
       error = legacyResult.error;
+      logCompanySettingsDebug("get:legacy", {
+        tenantId: tenant.tenantId,
+        ok: !error,
+        error: error?.message ?? null,
+        hasData: !!data,
+      });
     }
 
     if (error) {
@@ -308,6 +369,10 @@ export const companySettingsRepository = {
     const supabase = getSupabaseClient();
     const tenant = await resolveTenantContext(supabase);
     const payload = toPayload(draft);
+    logCompanySettingsDebug("save:start", {
+      tenantId: tenant.tenantId,
+      pricingTemplateKeys: Object.keys(draft.pricingTemplates ?? {}),
+    });
 
     let data: unknown = null;
     let error: { message: string } | null = null;
@@ -325,12 +390,44 @@ export const companySettingsRepository = {
       .single();
     data = primaryResult.data;
     error = primaryResult.error;
+    logCompanySettingsDebug("save:primary", {
+      tenantId: tenant.tenantId,
+      ok: !error,
+      error: error?.message ?? null,
+      hasData: !!data,
+    });
 
     if (error && isMissingPricingTemplatesColumnError(error.message)) {
       throw buildPricingTemplatesMigrationError();
     }
 
     if (error && isMissingColumnError(error.message)) {
+      const pricingCompatPayload = toPricingCompatPayload(draft);
+      const pricingCompatResult = await supabase
+        .from("company_settings")
+        .upsert({
+          tenant_id: tenant.tenantId,
+          ...pricingCompatPayload,
+          updated_at: nowIsoTimestamp(),
+        }, {
+          onConflict: "tenant_id",
+        })
+        .select(COMPANY_SETTINGS_SELECT_COLUMNS_PRICING_COMPAT)
+        .single();
+      data = pricingCompatResult.data;
+      error = pricingCompatResult.error;
+      logCompanySettingsDebug("save:pricing-compat", {
+        tenantId: tenant.tenantId,
+        ok: !error,
+        error: error?.message ?? null,
+        hasData: !!data,
+      });
+    }
+
+    if (error && isMissingColumnError(error.message)) {
+      if (isMissingPricingTemplatesColumnError(error.message)) {
+        throw buildPricingTemplatesMigrationError();
+      }
       const legacyPayload = toLegacyPayload(draft);
       const legacyResult = await supabase
         .from("company_settings")
@@ -345,6 +442,12 @@ export const companySettingsRepository = {
         .single();
       data = legacyResult.data;
       error = legacyResult.error;
+      logCompanySettingsDebug("save:legacy", {
+        tenantId: tenant.tenantId,
+        ok: !error,
+        error: error?.message ?? null,
+        hasData: !!data,
+      });
     }
 
     if (error || !data) {
@@ -358,6 +461,10 @@ export const companySettingsRepository = {
     const supabase = getSupabaseClient();
     const tenant = await resolveTenantContext(supabase);
     const payload = toPayload(draft);
+    logCompanySettingsDebug("update:start", {
+      tenantId: tenant.tenantId,
+      pricingTemplateKeys: Object.keys(draft.pricingTemplates ?? {}),
+    });
 
     let data: unknown = null;
     let error: { message: string } | null = null;
@@ -373,12 +480,42 @@ export const companySettingsRepository = {
       .single();
     data = primaryResult.data;
     error = primaryResult.error;
+    logCompanySettingsDebug("update:primary", {
+      tenantId: tenant.tenantId,
+      ok: !error,
+      error: error?.message ?? null,
+      hasData: !!data,
+    });
 
     if (error && isMissingPricingTemplatesColumnError(error.message)) {
       throw buildPricingTemplatesMigrationError();
     }
 
     if (error && isMissingColumnError(error.message)) {
+      const pricingCompatPayload = toPricingCompatPayload(draft);
+      const pricingCompatResult = await supabase
+        .from("company_settings")
+        .update({
+          ...pricingCompatPayload,
+          updated_at: nowIsoTimestamp(),
+        })
+        .eq("tenant_id", tenant.tenantId)
+        .select(COMPANY_SETTINGS_SELECT_COLUMNS_PRICING_COMPAT)
+        .single();
+      data = pricingCompatResult.data;
+      error = pricingCompatResult.error;
+      logCompanySettingsDebug("update:pricing-compat", {
+        tenantId: tenant.tenantId,
+        ok: !error,
+        error: error?.message ?? null,
+        hasData: !!data,
+      });
+    }
+
+    if (error && isMissingColumnError(error.message)) {
+      if (isMissingPricingTemplatesColumnError(error.message)) {
+        throw buildPricingTemplatesMigrationError();
+      }
       const legacyPayload = toLegacyPayload(draft);
       const legacyResult = await supabase
         .from("company_settings")
@@ -391,6 +528,12 @@ export const companySettingsRepository = {
         .single();
       data = legacyResult.data;
       error = legacyResult.error;
+      logCompanySettingsDebug("update:legacy", {
+        tenantId: tenant.tenantId,
+        ok: !error,
+        error: error?.message ?? null,
+        hasData: !!data,
+      });
     }
 
     if (error || !data) {
