@@ -59,6 +59,8 @@ function isMissingColumnError(message?: string | null): boolean {
     return false;
   }
 
+  const normalized = message.toLowerCase();
+
   return message.includes("column quotes.number does not exist")
     || message.includes("column quotes.service_type does not exist")
     || message.includes("column quotes.sent_at does not exist")
@@ -80,7 +82,8 @@ function isMissingColumnError(message?: string | null): boolean {
     || message.includes("Could not find the 'vat_amount' column")
     || message.includes("Could not find the 'total_gross' column")
     || message.includes("Could not find the 'pdf_storage_path' column")
-    || message.includes("Could not find the 'pdf_public_url' column");
+    || message.includes("Could not find the 'pdf_public_url' column")
+    || normalized.includes("within group is required for ordered-set aggregate mode");
 }
 
 async function selectQuoteRowsWithFallback<T>(

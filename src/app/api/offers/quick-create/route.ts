@@ -75,6 +75,22 @@ function normalizeText(value?: string | null): string {
   return (value ?? "").trim();
 }
 
+function isLegacyQuotesColumnError(message?: string | null): boolean {
+  if (!message) {
+    return false;
+  }
+
+  const normalized = message.toLowerCase();
+  return message.includes("column quotes.mode does not exist")
+    || message.includes("column quotes.final_text does not exist")
+    || message.includes("column quotes.subtotal_net does not exist")
+    || message.includes("column quotes.vat_amount does not exist")
+    || message.includes("column quotes.total_gross does not exist")
+    || message.includes("column quotes.pdf_storage_path does not exist")
+    || message.includes("column quotes.pdf_public_url does not exist")
+    || normalized.includes("within group is required for ordered-set aggregate mode");
+}
+
 function parseAddress(input: QuickCreateRequestBody["customer"]): string {
   const street = normalizeText(input.street);
   const postalCode = normalizeText(input.postalCode);
@@ -365,18 +381,7 @@ async function createQuote(params: {
     .select("id, number")
     .single();
 
-  if (
-    created.error
-    && (
-      created.error.message.includes("column quotes.mode does not exist")
-      || created.error.message.includes("column quotes.final_text does not exist")
-      || created.error.message.includes("column quotes.subtotal_net does not exist")
-      || created.error.message.includes("column quotes.vat_amount does not exist")
-      || created.error.message.includes("column quotes.total_gross does not exist")
-      || created.error.message.includes("column quotes.pdf_storage_path does not exist")
-      || created.error.message.includes("column quotes.pdf_public_url does not exist")
-    )
-  ) {
+  if (created.error && isLegacyQuotesColumnError(created.error.message)) {
     const fallback = await supabase
       .from("quotes")
       .insert({

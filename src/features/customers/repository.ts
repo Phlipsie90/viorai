@@ -15,6 +15,7 @@ export interface CustomerDraft {
 export interface CustomerRepository {
   list(): Promise<Customer[]>;
   get(customerId: string): Promise<Customer | null>;
+  findByCompanyAndEmail(input: { companyName: string; email?: string | null }): Promise<Customer | null>;
   create(draft: CustomerDraft): Promise<Customer>;
   update(customerId: string, draft: CustomerDraft): Promise<Customer>;
   getSelectedCustomerId(): Promise<string | null>;
@@ -132,6 +133,46 @@ export const localCustomerRepository: CustomerRepository = {
     }
 
     return data ? mapRowToCustomer(data as CustomerRow) : null;
+  },
+
+  async findByCompanyAndEmail(input) {
+    const supabase = getSupabaseClient();
+    const tenant = await resolveTenantContext(supabase);
+    const normalizedCompanyName = input.companyName.trim();
+    if (!normalizedCompanyName) {
+      return null;
+    }
+
+    const normalizedEmail = input.email?.trim().toLowerCase() || null;
+    const query = supabase
+      .from("customers")
+      .select(CUSTOMER_SELECT_COLUMNS)
+      .eq("tenant_id", tenant.tenantId)
+      .ilike("company_name", normalizedCompanyName)
+      .limit(20);
+
+    const { data, error } = await query;
+    if (error) {
+      throw new Error(error.message);
+    }
+
+    const mapped = (data ?? []).map((entry) => mapRowToCustomer(entry as CustomerRow));
+    if (mapped.length === 0) {
+      return null;
+    }
+
+    if (normalizedEmail) {
+      const emailMatch = mapped.find((customer) => customer.email?.trim().toLowerCase() === normalizedEmail);
+      if (emailMatch) {
+        return emailMatch;
+      }
+    }
+
+    const exactCompanyMatch = mapped.find(
+      (customer) => customer.companyName.trim().toLowerCase() === normalizedCompanyName.toLowerCase()
+    );
+
+    return exactCompanyMatch ?? mapped[0] ?? null;
   },
 
   async create(draft) {
