@@ -163,7 +163,7 @@ export default function DashboardPage() {
             href="/planner?mode=schnellangebot&quelle=dashboard"
             className="inline-flex w-full items-center justify-center rounded-2xl bg-[var(--brand-accent)] px-6 py-4 text-base font-semibold text-white shadow-[0_18px_40px_rgba(249,115,22,0.28)] transition-transform hover:-translate-y-0.5 hover:bg-[var(--brand-accent-hover)] lg:w-auto"
           >
-            Neues Angebot in 2 Min erstellen
+            Angebot in 2 Min erstellen
           </Link>
         </div>
         <p className="mt-3 text-sm text-slate-600">Kunde wählen, Leistung auswählen, Angebot starten.</p>
@@ -193,7 +193,24 @@ export default function DashboardPage() {
         />
       </section>
 
-      <section className="grid grid-cols-1 gap-4 xl:grid-cols-[1.7fr_1fr]">
+      <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="grid grid-cols-1 gap-2 md:grid-cols-4">
+          {[
+            { step: "1", title: "Kunde & Einsatzort", text: "Alle Pflichtdaten in einem Block" },
+            { step: "2", title: "Leistung & Kalkulation", text: "Defaults laden und Preis automatisch berechnen" },
+            { step: "3", title: "Angebot erstellen", text: "Text + PDF automatisch erzeugen" },
+            { step: "4", title: "Fertig", text: "Speichern, bearbeiten, versenden" },
+          ].map((item) => (
+            <div key={item.step} className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
+              <p className="text-xs font-semibold uppercase tracking-wide text-[var(--brand-accent)]">Schritt {item.step}</p>
+              <p className="mt-1 text-sm font-semibold text-slate-900">{item.title}</p>
+              <p className="mt-1 text-xs text-slate-600">{item.text}</p>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section className="grid grid-cols-1 gap-4 xl:grid-cols-[1.7fr_1fr_1fr]">
         <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
           <h3 className="mb-3 text-xl font-semibold text-[#172033]">Aktuelle Angebote</h3>
           {latestQuotes.length === 0 ? (
@@ -208,6 +225,7 @@ export default function DashboardPage() {
                 return (
                   <OfferRow
                     key={quote.id}
+                    quoteId={quote.id}
                     number={quote.number ?? `Offer ${quote.id.slice(0, 6)}`}
                     title={`${project?.name ?? customerNameById.get(quote.customerId) ?? "Projekt"} (${serviceLabel})`}
                     price={formatEuro(quote.pricing.netTotal)}
@@ -272,6 +290,26 @@ export default function DashboardPage() {
             )}
           </div>
         </div>
+
+        <aside className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm space-y-3">
+          <h4 className="text-lg font-semibold text-[#172033]">Warum ViorAI?</h4>
+          {[
+            "Blitzschnelle Angebotserstellung in unter 2 Minuten",
+            "Kalkulation mit Standardwerten pro Leistungsart",
+            "Strukturierte Angebotstexte ohne KI-Floskeln",
+            "Professioneller PDF-Output für echte Kundentermine",
+            "Alles zentral: Kunde, Projekt, Angebot und Dokument",
+          ].map((item, index) => (
+            <div key={item} className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
+              <p className="text-xs font-semibold text-[var(--brand-accent)]">#{index + 1}</p>
+              <p className="mt-1 text-sm text-slate-700">{item}</p>
+            </div>
+          ))}
+          <div className="rounded-xl bg-slate-900 px-3 py-2 text-white">
+            <p className="text-xs uppercase tracking-wide text-slate-300">Heute</p>
+            <p className="mt-1 text-sm font-semibold">{openQuotesCount} offene Angebote im Fokus</p>
+          </div>
+        </aside>
       </section>
     </div>
   );
@@ -305,6 +343,7 @@ function MetricCard({
 }
 
 function OfferRow({
+  quoteId,
   number,
   title,
   price,
@@ -312,6 +351,7 @@ function OfferRow({
   badgeClass,
   time,
 }: {
+  quoteId: string;
   number: string;
   title: string;
   price: string;
@@ -320,7 +360,7 @@ function OfferRow({
   time: string;
 }) {
   return (
-    <article className="flex items-center gap-3 rounded-xl border border-slate-200 px-3 py-2.5">
+    <Link href={`/quotes/${quoteId}`} className="flex items-center gap-3 rounded-xl border border-slate-200 px-3 py-2.5 hover:bg-slate-50">
       <div className="h-10 w-10 rounded-lg border border-slate-200 bg-slate-50 text-xs font-semibold text-slate-500 flex items-center justify-center">
         PDF
       </div>
@@ -331,7 +371,7 @@ function OfferRow({
       <p className="text-sm font-semibold text-[#172033]">{price}</p>
       <span className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${badgeClass}`}>{badge}</span>
       <p className="text-xs text-slate-500">{time}</p>
-    </article>
+    </Link>
   );
 }
 

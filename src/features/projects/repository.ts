@@ -7,6 +7,10 @@ export interface ProjectDraft {
   name: string;
   location: string;
   siteAddress: string;
+  state?: string;
+  objectType?: string;
+  areaSize?: string;
+  requestedUnits?: number;
   description: string;
   startDate: string;
   endDate: string;
@@ -28,6 +32,10 @@ interface ProjectRow {
   name: string;
   location: string;
   site_address: string | null;
+  state?: string | null;
+  object_type?: string | null;
+  area_size?: string | null;
+  requested_units?: number | null;
   description: string | null;
   start_date: string | null;
   end_date: string | null;
@@ -38,7 +46,24 @@ interface ProjectRow {
 
 const SELECTED_PROJECT_KEY = "crm-tool.selected-project-id";
 const PROJECT_SELECT_COLUMNS =
+  "id, tenant_id, customer_id, name, location, site_address, state, object_type, area_size, requested_units, description, start_date, end_date, runtime_label, created_at, updated_at";
+const PROJECT_SELECT_COLUMNS_LEGACY =
   "id, tenant_id, customer_id, name, location, site_address, description, start_date, end_date, runtime_label, created_at, updated_at";
+
+function isMissingProjectColumnError(message?: string | null): boolean {
+  if (!message) {
+    return false;
+  }
+
+  return message.includes("column projects.state does not exist")
+    || message.includes("column projects.object_type does not exist")
+    || message.includes("column projects.area_size does not exist")
+    || message.includes("column projects.requested_units does not exist")
+    || message.includes("Could not find the 'state' column")
+    || message.includes("Could not find the 'object_type' column")
+    || message.includes("Could not find the 'area_size' column")
+    || message.includes("Could not find the 'requested_units' column");
+}
 
 function nowIsoTimestamp(): IsoDateTimeString {
   return new Date().toISOString();
@@ -73,6 +98,10 @@ function toProjectDbPayload(draft: ProjectDraft, tenantId: string) {
     name,
     location,
     site_address: siteAddress,
+    state: normalizeOptional(draft.state ?? ""),
+    object_type: normalizeOptional(draft.objectType ?? ""),
+    area_size: normalizeOptional(draft.areaSize ?? ""),
+    requested_units: Number.isFinite(draft.requestedUnits) ? Math.max(0, Number(draft.requestedUnits)) : null,
     description: normalizeOptional(draft.description),
     start_date: normalizeOptional(draft.startDate),
     end_date: normalizeOptional(draft.endDate),
@@ -88,12 +117,30 @@ function mapRowToProject(row: ProjectRow): Project {
     name: row.name,
     location: row.location,
     siteAddress: row.site_address ?? undefined,
+    state: row.state ?? undefined,
+    objectType: row.object_type ?? undefined,
+    areaSize: row.area_size ?? undefined,
+    requestedUnits: Number.isFinite(row.requested_units) ? Number(row.requested_units) : undefined,
     description: row.description ?? undefined,
     startDate: row.start_date ?? undefined,
     endDate: row.end_date ?? undefined,
     runtimeLabel: row.runtime_label ?? undefined,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  };
+}
+
+function toLegacyProjectPayload(payload: ReturnType<typeof toProjectDbPayload>) {
+  return {
+    tenant_id: payload.tenant_id,
+    customer_id: payload.customer_id,
+    name: payload.name,
+    location: payload.location,
+    site_address: payload.site_address,
+    description: payload.description,
+    start_date: payload.start_date,
+    end_date: payload.end_date,
+    runtime_label: payload.runtime_label,
   };
 }
 
@@ -105,10 +152,21 @@ export const localProjectRepository: ProjectRepository = {
   async list() {
     const supabase = getSupabaseClient();
     const tenant = await resolveTenantContext(supabase);
-    const { data, error } = await supabase
+    const primaryResult = await supabase
       .from("projects")
       .select(PROJECT_SELECT_COLUMNS)
       .eq("tenant_id", tenant.tenantId);
+    let data = primaryResult.data as ProjectRow[] | null;
+    let error = primaryResult.error;
+
+    if (error && isMissingProjectColumnError(error.message)) {
+      const legacyResult = await supabase
+        .from("projects")
+        .select(PROJECT_SELECT_COLUMNS_LEGACY)
+        .eq("tenant_id", tenant.tenantId);
+      data = legacyResult.data;
+      error = legacyResult.error;
+    }
 
     if (error) {
       throw new Error(error.message);
@@ -123,7 +181,7 @@ export const localProjectRepository: ProjectRepository = {
     const timestamp = nowIsoTimestamp();
     const payload = toProjectDbPayload(draft, tenant.tenantId);
 
-    const { data, error } = await supabase
+    const primaryResult = await supabase
       .from("projects")
       .insert({
         ...payload,
@@ -132,6 +190,22 @@ export const localProjectRepository: ProjectRepository = {
       })
       .select(PROJECT_SELECT_COLUMNS)
       .single();
+    let data = primaryResult.data as ProjectRow | null;
+    let error = primaryResult.error;
+
+    if (error && isMissingProjectColumnError(error.message)) {
+      const legacyResult = await supabase
+        .from("projects")
+        .insert({
+          ...toLegacyProjectPayload(payload),
+          created_at: timestamp,
+          updated_at: timestamp,
+        })
+        .select(PROJECT_SELECT_COLUMNS_LEGACY)
+        .single();
+      data = legacyResult.data;
+      error = legacyResult.error;
+    }
 
     if (error || !data) {
       throw new Error(error?.message ?? "Projekt konnte nicht erstellt werden.");
@@ -144,7 +218,7 @@ export const localProjectRepository: ProjectRepository = {
     const supabase = getSupabaseClient();
     const tenant = await resolveTenantContext(supabase);
     const payload = toProjectDbPayload(draft, tenant.tenantId);
-    const { data, error } = await supabase
+    const primaryResult = await supabase
       .from("projects")
       .update({
         ...payload,
@@ -154,6 +228,23 @@ export const localProjectRepository: ProjectRepository = {
       .eq("tenant_id", tenant.tenantId)
       .select(PROJECT_SELECT_COLUMNS)
       .single();
+    let data = primaryResult.data as ProjectRow | null;
+    let error = primaryResult.error;
+
+    if (error && isMissingProjectColumnError(error.message)) {
+      const legacyResult = await supabase
+        .from("projects")
+        .update({
+          ...toLegacyProjectPayload(payload),
+          updated_at: nowIsoTimestamp(),
+        })
+        .eq("id", projectId)
+        .eq("tenant_id", tenant.tenantId)
+        .select(PROJECT_SELECT_COLUMNS_LEGACY)
+        .single();
+      data = legacyResult.data;
+      error = legacyResult.error;
+    }
 
     if (error || !data) {
       throw new Error(error?.message ?? "Projekt wurde nicht gefunden.");

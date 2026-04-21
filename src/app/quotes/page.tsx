@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import PageHeader from "@/components/ui/PageHeader";
 import Button from "@/components/ui/Button";
+import { getSupabaseClient, getSupabaseSessionSafe } from "@/lib/supabase/client";
 import { localCustomerRepository } from "@/features/customers/repository";
 import { localProjectRepository } from "@/features/projects/repository";
 import { localQuoteRepository } from "@/features/quotes/repository";
@@ -96,6 +97,45 @@ export default function QuotesPage() {
     router.push(`/planner?quoteId=${quote.id}`);
   };
 
+  const handleOpenDetail = (quoteId: string) => {
+    router.push(`/quotes/${quoteId}`);
+  };
+
+  const handleDownloadPdf = async (quoteId: string) => {
+    try {
+      const supabase = getSupabaseClient();
+      const { data } = await getSupabaseSessionSafe(supabase);
+      const token = data.session?.access_token;
+      if (!token) {
+        throw new Error("Session ist abgelaufen. Bitte erneut anmelden.");
+      }
+
+      const response = await fetch(`/api/offers/${quoteId}/pdf`, {
+        method: "GET",
+        headers: {
+          authorization: `Bearer ${token}`,
+        },
+      });
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(payload?.error ?? "PDF konnte nicht geladen werden.");
+      }
+
+      const blob = await response.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = objectUrl;
+      anchor.download = `angebot_${quoteId}.pdf`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(objectUrl);
+      setError(null);
+    } catch (downloadError) {
+      setError(downloadError instanceof Error ? downloadError.message : "PDF konnte nicht geladen werden.");
+    }
+  };
+
   const handleStatusChange = async (quoteId: string, status: QuoteStatus) => {
     await localQuoteRepository.updateQuoteStatus(quoteId, status);
     await loadData(quoteId);
@@ -122,16 +162,17 @@ export default function QuotesPage() {
       <PageHeader
         title="Angebote"
         description="Gespeicherte Angebote mit Statusverwaltung, Timeline und Duplizieren."
-        action={<Button onClick={() => router.push("/planner")}>Neues Angebot erstellen</Button>}
+        action={<Button onClick={() => router.push("/planner?mode=schnellangebot&quelle=angebote")}>Neues Angebot in 2 Min erstellen</Button>}
       />
 
       <div className="bg-white rounded-lg border border-slate-200 overflow-hidden">
-        <div className="px-5 py-3 border-b border-slate-100 grid grid-cols-6 gap-3 text-xs font-semibold text-slate-500 uppercase tracking-wide">
+        <div className="px-5 py-3 border-b border-slate-100 grid grid-cols-7 gap-3 text-xs font-semibold text-slate-500 uppercase tracking-wide">
           <span>Nummer</span>
           <span>Kunde</span>
           <span>Projekt</span>
           <span>Summe</span>
           <span>Status</span>
+          <span>Datum</span>
           <span>Aktion</span>
         </div>
 
@@ -148,7 +189,7 @@ export default function QuotesPage() {
 
               return (
                 <li key={quote.id} className="border-b border-slate-100 last:border-b-0">
-                  <div className="px-5 py-3 grid grid-cols-6 gap-3 items-center">
+                  <div className="px-5 py-3 grid grid-cols-7 gap-3 items-center">
                     <div className="text-sm text-slate-700">
                       <div className="font-medium text-slate-800">{quote.number ?? "-"}</div>
                       <div className="text-xs text-slate-500">
@@ -173,9 +214,16 @@ export default function QuotesPage() {
                         <option value="rejected">Abgelehnt</option>
                       </select>
                     </div>
+                    <span className="text-xs text-slate-600">{formatDate(quote.updatedAt)}</span>
                     <div className="flex flex-wrap gap-2">
+                      <Button size="sm" variant="secondary" onClick={() => handleOpenDetail(quote.id)}>
+                        Details
+                      </Button>
                       <Button size="sm" variant="secondary" onClick={() => void handleOpenInPlanner(quote)}>
                         Angebot bearbeiten
+                      </Button>
+                      <Button size="sm" variant="ghost" onClick={() => void handleDownloadPdf(quote.id)}>
+                        PDF
                       </Button>
                       <Button size="sm" variant="ghost" onClick={() => void handleDuplicateQuote(quote.id)}>
                         Duplizieren
@@ -213,6 +261,19 @@ export default function QuotesPage() {
       </div>
     </div>
   );
+}
+
+function formatDate(value: string): string {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return "-";
+  }
+
+  return new Intl.DateTimeFormat("de-DE", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+  }).format(parsed);
 }
 
 function formatDateTime(value: string): string {

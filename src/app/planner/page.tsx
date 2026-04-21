@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
+import { useRouter } from "next/navigation";
 import PageHeader from "@/components/ui/PageHeader";
 import PlannerCanvas from "@/components/planner/PlannerCanvas";
 import PlannerToolbar from "@/components/planner/PlannerToolbar";
@@ -59,7 +60,7 @@ import {
   DEFAULT_STANDARD_ONE_TIME_COSTS,
 } from "@/lib/pricing/calculator";
 import { buildQuotePdfFileName, downloadPdf, generateQuotePdf } from "@/lib/pdf/generator";
-import { getSupabaseClient, getSupabaseUserSafe } from "@/lib/supabase/client";
+import { getSupabaseClient, getSupabaseSessionSafe, getSupabaseUserSafe } from "@/lib/supabase/client";
 import { tryResolveTenantContext } from "@/lib/supabase/tenant-context";
 
 // ─── Hilfstabellen für UI-Labels ─────────────────────────────────────────────
@@ -154,9 +155,54 @@ interface LoadedPlannerAsset {
   sourceDataUrl: string;
 }
 
+interface QuickOfferIntakeState {
+  companyName: string;
+  contactName: string;
+  street: string;
+  postalCode: string;
+  city: string;
+  email: string;
+  phone: string;
+  projectName: string;
+  serviceAddress: string;
+  state: string;
+  objectType: string;
+  runtimeLabel: string;
+  notes: string;
+  areaSize: string;
+  requestedUnits: string;
+  mode: "quick" | "standard" | "manual";
+  serviceType: QuoteServiceType;
+  quickTemplateId: QuoteQuickTemplateId | "";
+  autoGenerateText: boolean;
+}
+
+const EMPTY_QUICK_OFFER_INTAKE: QuickOfferIntakeState = {
+  companyName: "",
+  contactName: "",
+  street: "",
+  postalCode: "",
+  city: "",
+  email: "",
+  phone: "",
+  projectName: "",
+  serviceAddress: "",
+  state: "",
+  objectType: "Objektschutz",
+  runtimeLabel: "Bis auf Widerruf",
+  notes: "",
+  areaSize: "",
+  requestedUnits: "",
+  mode: "quick",
+  serviceType: "objektschutz",
+  quickTemplateId: "objektschutz_standard",
+  autoGenerateText: true,
+};
+
 // ─── Hauptkomponente ──────────────────────────────────────────────────────────
 
 export default function PlannerPage() {
+  const router = useRouter();
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
   const quickOfferSectionRef = useRef<HTMLElement | null>(null);
   const snapshotResolverRef = useRef<((value: string | null) => void) | null>(null);
@@ -219,6 +265,8 @@ export default function PlannerPage() {
   const [isPdfGenerating, setIsPdfGenerating] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [isTextGenerating, setIsTextGenerating] = useState(false);
+  const [isQuickIntakeSubmitting, setIsQuickIntakeSubmitting] = useState(false);
+  const [quickIntakeForm, setQuickIntakeForm] = useState<QuickOfferIntakeState>(EMPTY_QUICK_OFFER_INTAKE);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [restoredPlannerStateKey, setRestoredPlannerStateKey] = useState<string | null>(null);
 
@@ -559,6 +607,97 @@ export default function PlannerPage() {
     );
   }, [companySettings?.pricingTemplates, isQuickOfferStarted, quickServiceType, quickTemplateId, serviceType]);
 
+  const handleQuickIntakeFieldChange = useCallback(
+    <K extends keyof QuickOfferIntakeState>(field: K, value: QuickOfferIntakeState[K]) => {
+      setQuickIntakeForm((prev) => ({ ...prev, [field]: value }));
+    },
+    []
+  );
+
+  const handleCreateQuickOfferContext = useCallback(async () => {
+    const requiredFields: Array<{ key: keyof QuickOfferIntakeState; label: string }> = [
+      { key: "companyName", label: "Firmenname" },
+      { key: "contactName", label: "Ansprechpartner" },
+      { key: "street", label: "Straße" },
+      { key: "postalCode", label: "PLZ" },
+      { key: "city", label: "Ort" },
+      { key: "projectName", label: "Projektname" },
+      { key: "serviceAddress", label: "Leistungsort" },
+    ];
+
+    const missingRequiredField = requiredFields.find(
+      (field) => String(quickIntakeForm[field.key] ?? "").trim().length === 0
+    );
+    if (missingRequiredField) {
+      setErrorMessage(`${missingRequiredField.label} ist ein Pflichtfeld.`);
+      return;
+    }
+
+    setErrorMessage(null);
+    setIsQuickIntakeSubmitting(true);
+    try {
+      const supabase = getSupabaseClient();
+      const { data } = await getSupabaseSessionSafe(supabase);
+      const accessToken = data.session?.access_token;
+      if (!accessToken) {
+        throw new Error("Session ist abgelaufen. Bitte erneut anmelden.");
+      }
+
+      const response = await fetch("/api/offers/quick-create", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({
+          customer: {
+            companyName: quickIntakeForm.companyName,
+            contactName: quickIntakeForm.contactName,
+            street: quickIntakeForm.street,
+            postalCode: quickIntakeForm.postalCode,
+            city: quickIntakeForm.city,
+            email: quickIntakeForm.email,
+            phone: quickIntakeForm.phone,
+          },
+          project: {
+            name: quickIntakeForm.projectName,
+            serviceAddress: quickIntakeForm.serviceAddress,
+            state: quickIntakeForm.state,
+            objectType: quickIntakeForm.objectType,
+            runtimeLabel: quickIntakeForm.runtimeLabel,
+            notes: quickIntakeForm.notes,
+            areaSize: quickIntakeForm.areaSize,
+            requestedUnits: parseNonNegativeNumber(quickIntakeForm.requestedUnits),
+          },
+          offer: {
+            mode: quickIntakeForm.mode,
+            serviceType: quickIntakeForm.serviceType,
+            quickTemplateId: quickIntakeForm.quickTemplateId || undefined,
+            autoGenerateText: quickIntakeForm.autoGenerateText,
+          },
+        }),
+      });
+
+      const result = (await response.json().catch(() => null)) as
+        | { error?: string; quoteId?: string; projectId?: string; customerId?: string }
+        | null;
+      if (!response.ok || !result?.quoteId || !result.projectId) {
+        throw new Error(result?.error ?? "Schnell-Angebot konnte nicht erstellt werden.");
+      }
+
+      await localProjectRepository.setSelectedProjectId(result.projectId);
+      if (result.customerId) {
+        await localCustomerRepository.setSelectedCustomerId(result.customerId);
+      }
+
+      router.replace(`/quotes/${result.quoteId}?source=quick`);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Schnell-Angebot konnte nicht erstellt werden.");
+    } finally {
+      setIsQuickIntakeSubmitting(false);
+    }
+  }, [quickIntakeForm, router]);
+
   const isVideotowerService = serviceType === "baustellenueberwachung";
 
   const quickTemplates = useMemo(() => {
@@ -574,6 +713,42 @@ export default function PlannerPage() {
       setQuickTemplateId(quickTemplates[0].id);
     }
   }, [quickTemplateId, quickTemplates]);
+
+  useEffect(() => {
+    if (activeCustomer || activeProject) {
+      return;
+    }
+
+    setQuickIntakeForm((prev) => ({
+      ...prev,
+      companyName: prev.companyName || customerName || "",
+      contactName: prev.contactName || "",
+      email: prev.email || "",
+      phone: prev.phone || "",
+      projectName: prev.projectName || projectName || "",
+      serviceAddress: prev.serviceAddress || "",
+    }));
+  }, [activeCustomer, activeProject, customerName, projectName]);
+
+  useEffect(() => {
+    const templates = getQuickTemplatesForServiceType(quickIntakeForm.serviceType);
+    if (templates.length === 0) {
+      if (quickIntakeForm.quickTemplateId !== "") {
+        setQuickIntakeForm((prev) => ({
+          ...prev,
+          quickTemplateId: "",
+        }));
+      }
+      return;
+    }
+
+    if (!templates.some((template) => template.id === quickIntakeForm.quickTemplateId)) {
+      setQuickIntakeForm((prev) => ({
+        ...prev,
+        quickTemplateId: templates[0].id,
+      }));
+    }
+  }, [quickIntakeForm.quickTemplateId, quickIntakeForm.serviceType]);
 
   const activeTowerTemplates = useMemo(() => {
     return towerTemplatesCatalog.filter((template) => template.isActive !== false);
@@ -1805,6 +1980,12 @@ export default function PlannerPage() {
       customerId: activeCustomer.id,
       projectId: activeProject.id,
       serviceType,
+      mode:
+        isQuickOfferStarted
+          ? "quick"
+          : isManualPricingOpen
+            ? "manual"
+            : "standard",
       positions: quoteLineItems,
       pricing: {
         monthlyTotal: quoteTotals.monthlyTotal,
@@ -1835,7 +2016,7 @@ export default function PlannerPage() {
     setEmailSubject(buildDefaultEmailSubject(persisted.number, activeProject.name));
     setEmailText((prev) => (prev.trim().length > 0 ? prev : buildDefaultEmailText(persisted.number, activeCustomer.companyName)));
     return persisted;
-  }, [activeCustomer, activeProject, activeQuoteId, buildStoredAiSummary, companySettings?.defaultValidityDays, conceptText, generatedText, quoteLineItems, quoteTotals, serviceType]);
+  }, [activeCustomer, activeProject, activeQuoteId, buildStoredAiSummary, companySettings?.defaultValidityDays, conceptText, generatedText, isManualPricingOpen, isQuickOfferStarted, quoteLineItems, quoteTotals, serviceType]);
 
   const handleSaveQuote = useCallback(async () => {
     setErrorMessage(null);
@@ -2110,15 +2291,155 @@ export default function PlannerPage() {
   }
 
   if (!activeProject) {
+    const intakeTemplates = getQuickTemplatesForServiceType(quickIntakeForm.serviceType);
     return (
       <div className="space-y-4">
-        <PageHeader title="Angebotseditor" description="Bitte zuerst ein Projekt anlegen und aus der Projektliste öffnen." />
-        <div className="bg-amber-50 border border-amber-200 rounded-md px-4 py-3 text-sm text-amber-800 flex items-center justify-between gap-3">
-          <span>Kein Projekt ausgewählt. Der Angebotseditor arbeitet immer im Kontext eines Projekts.</span>
-          <Link href="/projects" className="inline-flex items-center gap-2 font-medium rounded-md transition-colors focus:outline-none focus:ring-2 focus:ring-offset-1 focus:ring-blue-500 bg-blue-600 text-white hover:bg-blue-700 px-4 py-2 text-sm">
-            Zu Projekten
-          </Link>
-        </div>
+        <PageHeader
+          title="Schnell-Angebot"
+          description="Kunde, Einsatzdaten und Leistungsart in einem Ablauf erfassen. Danach wird das Angebot automatisch erstellt."
+        />
+        <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm space-y-5">
+          <div className="rounded-2xl border border-orange-200 bg-orange-50 p-4">
+            <h2 className="text-xl font-semibold text-slate-900">Neues Angebot in 2 Min erstellen</h2>
+            <p className="mt-1 text-sm text-slate-600">
+              Kunde erfassen oder wiederverwenden, Projekt anlegen, Angebot automatisch generieren.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 gap-5 xl:grid-cols-3">
+            <div className="xl:col-span-2 space-y-5">
+              <div className="rounded-xl border border-slate-200 p-4">
+                <h3 className="text-sm font-semibold text-slate-900">Kundendaten</h3>
+                <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
+                  <label className="text-xs text-slate-600">
+                    Firmenname *
+                    <input className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" value={quickIntakeForm.companyName} onChange={(event) => handleQuickIntakeFieldChange("companyName", event.target.value)} />
+                  </label>
+                  <label className="text-xs text-slate-600">
+                    Ansprechpartner *
+                    <input className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" value={quickIntakeForm.contactName} onChange={(event) => handleQuickIntakeFieldChange("contactName", event.target.value)} />
+                  </label>
+                  <label className="text-xs text-slate-600 md:col-span-2">
+                    Straße *
+                    <input className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" value={quickIntakeForm.street} onChange={(event) => handleQuickIntakeFieldChange("street", event.target.value)} />
+                  </label>
+                  <label className="text-xs text-slate-600">
+                    PLZ *
+                    <input className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" value={quickIntakeForm.postalCode} onChange={(event) => handleQuickIntakeFieldChange("postalCode", event.target.value)} />
+                  </label>
+                  <label className="text-xs text-slate-600">
+                    Ort *
+                    <input className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" value={quickIntakeForm.city} onChange={(event) => handleQuickIntakeFieldChange("city", event.target.value)} />
+                  </label>
+                  <label className="text-xs text-slate-600">
+                    E-Mail
+                    <input type="email" className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" value={quickIntakeForm.email} onChange={(event) => handleQuickIntakeFieldChange("email", event.target.value)} />
+                  </label>
+                  <label className="text-xs text-slate-600">
+                    Telefon
+                    <input className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" value={quickIntakeForm.phone} onChange={(event) => handleQuickIntakeFieldChange("phone", event.target.value)} />
+                  </label>
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-slate-200 p-4">
+                <h3 className="text-sm font-semibold text-slate-900">Projekt / Einsatzort</h3>
+                <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
+                  <label className="text-xs text-slate-600">
+                    Projektname *
+                    <input className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" value={quickIntakeForm.projectName} onChange={(event) => handleQuickIntakeFieldChange("projectName", event.target.value)} />
+                  </label>
+                  <label className="text-xs text-slate-600">
+                    Objektart
+                    <select className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white" value={quickIntakeForm.objectType} onChange={(event) => handleQuickIntakeFieldChange("objectType", event.target.value)}>
+                      <option>Objektschutz</option>
+                      <option>Baustellenbewachung</option>
+                      <option>Videoüberwachung</option>
+                      <option>Revierdienst</option>
+                      <option>Empfangsdienst</option>
+                      <option>Veranstaltungsdienst</option>
+                      <option>Sonstiges</option>
+                    </select>
+                  </label>
+                  <label className="text-xs text-slate-600 md:col-span-2">
+                    Leistungsort / Einsatzadresse *
+                    <input className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" value={quickIntakeForm.serviceAddress} onChange={(event) => handleQuickIntakeFieldChange("serviceAddress", event.target.value)} />
+                  </label>
+                  <label className="text-xs text-slate-600">
+                    Bundesland
+                    <input className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" value={quickIntakeForm.state} onChange={(event) => handleQuickIntakeFieldChange("state", event.target.value)} />
+                  </label>
+                  <label className="text-xs text-slate-600">
+                    Laufzeit
+                    <input className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" value={quickIntakeForm.runtimeLabel} onChange={(event) => handleQuickIntakeFieldChange("runtimeLabel", event.target.value)} />
+                  </label>
+                  <label className="text-xs text-slate-600">
+                    Fläche / Größe
+                    <input className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" value={quickIntakeForm.areaSize} onChange={(event) => handleQuickIntakeFieldChange("areaSize", event.target.value)} />
+                  </label>
+                  <label className="text-xs text-slate-600">
+                    Gewünschte Anzahl
+                    <input type="number" min={0} className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" value={quickIntakeForm.requestedUnits} onChange={(event) => handleQuickIntakeFieldChange("requestedUnits", event.target.value)} />
+                  </label>
+                  <label className="text-xs text-slate-600 md:col-span-2">
+                    Besonderheiten
+                    <textarea className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm min-h-20" value={quickIntakeForm.notes} onChange={(event) => handleQuickIntakeFieldChange("notes", event.target.value)} />
+                  </label>
+                </div>
+              </div>
+            </div>
+
+            <aside className="space-y-4 rounded-xl border border-slate-200 p-4 bg-slate-50">
+              <h3 className="text-sm font-semibold text-slate-900">Angebotsmodus</h3>
+              <label className="text-xs text-slate-600">
+                Modus
+                <select className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm" value={quickIntakeForm.mode} onChange={(event) => handleQuickIntakeFieldChange("mode", event.target.value as QuickOfferIntakeState["mode"])}>
+                  <option value="quick">Schnellangebot</option>
+                  <option value="standard">Standardangebot</option>
+                  <option value="manual">Manuell</option>
+                </select>
+              </label>
+              <label className="text-xs text-slate-600">
+                Leistungsart
+                <select className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm" value={quickIntakeForm.serviceType} onChange={(event) => handleQuickIntakeFieldChange("serviceType", event.target.value as QuoteServiceType)}>
+                  {QUOTE_SERVICE_TYPE_OPTIONS
+                    .map(([value, label]) => (
+                    <option key={value} value={value}>{label}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="text-xs text-slate-600">
+                Vorlage
+                {intakeTemplates.length > 0 ? (
+                  <select className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm" value={quickIntakeForm.quickTemplateId} onChange={(event) => handleQuickIntakeFieldChange("quickTemplateId", event.target.value as QuoteQuickTemplateId)}>
+                    {intakeTemplates.map((template) => (
+                      <option key={template.id} value={template.id}>{template.label}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <div className="mt-1 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+                    Keine feste Vorlage hinterlegt. Es werden die Standardwerte aus den Voreinstellungen verwendet.
+                  </div>
+                )}
+              </label>
+              <label className="flex items-center gap-2 text-sm text-slate-700">
+                <input type="checkbox" checked={quickIntakeForm.autoGenerateText} onChange={(event) => handleQuickIntakeFieldChange("autoGenerateText", event.target.checked)} />
+                Text automatisch generieren
+              </label>
+              <button
+                type="button"
+                onClick={() => void handleCreateQuickOfferContext()}
+                disabled={isQuickIntakeSubmitting}
+                className="inline-flex w-full items-center justify-center rounded-xl bg-[var(--brand-accent)] px-4 py-3 text-sm font-semibold text-white transition-colors hover:bg-[var(--brand-accent-hover)] disabled:opacity-60"
+              >
+                {isQuickIntakeSubmitting ? "Erstellt Angebot..." : "Angebot in 2 Min erstellen"}
+              </button>
+              <p className="text-xs text-slate-500">
+                Kunde und Projekt werden automatisch gespeichert und direkt mit dem neuen Angebot verknüpft.
+              </p>
+            </aside>
+          </div>
+        </section>
       </div>
     );
   }

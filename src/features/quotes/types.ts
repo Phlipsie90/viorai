@@ -4,6 +4,7 @@ import type { QuoteServiceType } from "./service-types";
 export type IsoDateString = string;
 
 export type QuoteStatus = "draft" | "sent" | "accepted" | "rejected";
+export type QuoteMode = "quick" | "standard" | "manual";
 
 export interface QuotePricing {
   monthlyTotal: number;
@@ -22,14 +23,22 @@ export interface Quote {
   customerId: string;
   projectId: string;
   serviceType?: QuoteServiceType;
+  mode?: QuoteMode;
   positions: QuoteLineItem[];
   pricing: QuotePricing;
   status: QuoteStatus;
   generatedText?: string;
   conceptText?: string;
+  finalText?: string;
   aiInputSummary?: string;
   validUntil?: IsoDateString;
   sentAt?: string;
+  marginTarget?: number;
+  subtotalNet?: number;
+  vatAmount?: number;
+  totalGross?: number;
+  pdfStoragePath?: string;
+  pdfPublicUrl?: string;
   createdAt: string;
   updatedAt: string;
 }

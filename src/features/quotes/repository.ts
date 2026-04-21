@@ -1,7 +1,7 @@
 import type { IsoDateTimeString, QuoteLineItem } from "@/types";
 import { getSupabaseClient } from "@/lib/supabase/client";
 import { resolveTenantContext } from "@/lib/supabase/tenant-context";
-import type { Quote, QuoteStatus, QuoteStatusHistoryEntry } from "./types";
+import type { Quote, QuoteMode, QuoteStatus, QuoteStatusHistoryEntry } from "./types";
 import { isQuoteServiceType } from "./service-types";
 
 const LEGACY_STATUS_MAP: Record<string, QuoteStatus> = {
@@ -18,15 +18,23 @@ interface QuoteRow {
   number: string | null;
   customer_id: string;
   project_id: string;
+  mode?: string | null;
   service_type: string | null;
   positions: unknown;
   pricing: unknown;
   status: string;
   generated_text: string | null;
   concept_text: string | null;
+  final_text?: string | null;
   ai_input_summary: string | null;
   valid_until: string | null;
   sent_at: string | null;
+  margin_target?: number | null;
+  subtotal_net?: number | null;
+  vat_amount?: number | null;
+  total_gross?: number | null;
+  pdf_storage_path?: string | null;
+  pdf_public_url?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -42,7 +50,7 @@ interface QuoteStatusHistoryRow {
 }
 
 const QUOTE_SELECT_COLUMNS =
-  "id, tenant_id, number, customer_id, project_id, service_type, positions, pricing, status, generated_text, concept_text, ai_input_summary, valid_until, sent_at, created_at, updated_at";
+  "id, tenant_id, number, customer_id, project_id, mode, service_type, positions, pricing, status, generated_text, concept_text, final_text, ai_input_summary, valid_until, sent_at, margin_target, subtotal_net, vat_amount, total_gross, pdf_storage_path, pdf_public_url, created_at, updated_at";
 const QUOTE_SELECT_COLUMNS_LEGACY =
   "id, tenant_id, customer_id, project_id, positions, pricing, status, generated_text, concept_text, ai_input_summary, valid_until, created_at, updated_at";
 
@@ -54,9 +62,25 @@ function isMissingColumnError(message?: string | null): boolean {
   return message.includes("column quotes.number does not exist")
     || message.includes("column quotes.service_type does not exist")
     || message.includes("column quotes.sent_at does not exist")
+    || message.includes("column quotes.mode does not exist")
+    || message.includes("column quotes.final_text does not exist")
+    || message.includes("column quotes.margin_target does not exist")
+    || message.includes("column quotes.subtotal_net does not exist")
+    || message.includes("column quotes.vat_amount does not exist")
+    || message.includes("column quotes.total_gross does not exist")
+    || message.includes("column quotes.pdf_storage_path does not exist")
+    || message.includes("column quotes.pdf_public_url does not exist")
     || message.includes("Could not find the 'number' column")
     || message.includes("Could not find the 'service_type' column")
-    || message.includes("Could not find the 'sent_at' column");
+    || message.includes("Could not find the 'sent_at' column")
+    || message.includes("Could not find the 'mode' column")
+    || message.includes("Could not find the 'final_text' column")
+    || message.includes("Could not find the 'margin_target' column")
+    || message.includes("Could not find the 'subtotal_net' column")
+    || message.includes("Could not find the 'vat_amount' column")
+    || message.includes("Could not find the 'total_gross' column")
+    || message.includes("Could not find the 'pdf_storage_path' column")
+    || message.includes("Could not find the 'pdf_public_url' column");
 }
 
 async function selectQuoteRowsWithFallback<T>(
@@ -93,6 +117,13 @@ function sortQuotes(quotes: Quote[]): Quote[] {
 
 function normalizeStatus(status: string): QuoteStatus {
   return LEGACY_STATUS_MAP[status] ?? "draft";
+}
+
+function normalizeQuoteMode(mode?: string | null): QuoteMode | undefined {
+  if (mode === "quick" || mode === "standard" || mode === "manual") {
+    return mode;
+  }
+  return undefined;
 }
 
 function normalizeDateOnly(value?: string | null): string | undefined {
@@ -217,6 +248,7 @@ function mapRowToQuote(row: QuoteRow): Quote {
     number: row.number ?? undefined,
     customerId: row.customer_id,
     projectId: row.project_id,
+    mode: normalizeQuoteMode(row.mode),
     serviceType: isQuoteServiceType(row.service_type) ? row.service_type : undefined,
     positions: parsedPositions,
     pricing: {
@@ -231,9 +263,16 @@ function mapRowToQuote(row: QuoteRow): Quote {
     status: normalizeStatus(row.status),
     generatedText: row.generated_text ?? undefined,
     conceptText: row.concept_text ?? undefined,
+    finalText: row.final_text ?? undefined,
     aiInputSummary: row.ai_input_summary ?? undefined,
     validUntil: normalizeDateOnly(row.valid_until),
     sentAt: row.sent_at ?? undefined,
+    marginTarget: Number.isFinite(row.margin_target) ? Number(row.margin_target) : undefined,
+    subtotalNet: Number.isFinite(row.subtotal_net) ? Number(row.subtotal_net) : undefined,
+    vatAmount: Number.isFinite(row.vat_amount) ? Number(row.vat_amount) : undefined,
+    totalGross: Number.isFinite(row.total_gross) ? Number(row.total_gross) : undefined,
+    pdfStoragePath: row.pdf_storage_path ?? undefined,
+    pdfPublicUrl: row.pdf_public_url ?? undefined,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -269,15 +308,23 @@ function toDbPayload(quote: Quote, tenantId: string, createdAt?: string) {
     number: quote.number ?? null,
     customer_id: customerId,
     project_id: projectId,
+    mode: quote.mode ?? null,
     service_type: quote.serviceType ?? null,
     positions: quote.positions,
     pricing: quote.pricing,
     status: normalizeStatus(quote.status),
     generated_text: quote.generatedText ?? null,
     concept_text: quote.conceptText ?? null,
+    final_text: quote.finalText ?? null,
     ai_input_summary: quote.aiInputSummary ?? null,
     valid_until: normalizeDateOnly(quote.validUntil) ?? null,
     sent_at: quote.sentAt ?? null,
+    margin_target: Number.isFinite(quote.marginTarget) ? quote.marginTarget : null,
+    subtotal_net: Number.isFinite(quote.subtotalNet) ? quote.subtotalNet : null,
+    vat_amount: Number.isFinite(quote.vatAmount) ? quote.vatAmount : null,
+    total_gross: Number.isFinite(quote.totalGross) ? quote.totalGross : null,
+    pdf_storage_path: quote.pdfStoragePath ?? null,
+    pdf_public_url: quote.pdfPublicUrl ?? null,
     created_at: createdAt ?? quote.createdAt,
     updated_at: nowIsoTimestamp(),
   };
