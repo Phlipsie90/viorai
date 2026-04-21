@@ -9,6 +9,10 @@ export interface Project extends Timestamps {
   name: string;
   location: string;
   siteAddress?: string;
+  state?: string;
+  objectType?: string;
+  areaSize?: string;
+  requestedUnits?: number;
   description?: string;
   startDate?: string;
   endDate?: string;
