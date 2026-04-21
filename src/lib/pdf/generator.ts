@@ -31,6 +31,8 @@ const COLOR_LINE = rgb(0.78, 0.81, 0.86);
 const COLOR_HEADER_BG = rgb(0.95, 0.96, 0.98);
 const PDF_FONT_REGULAR_PATH = "fonts/noto-sans-regular.ttf";
 const PDF_FONT_BOLD_PATH = "fonts/noto-sans-bold.ttf";
+const PDF_DEBUG_TIMING = process.env.NODE_ENV !== "production";
+const PDF_FONT_CACHE = new Map<string, Promise<Uint8Array>>();
 
 interface DocumentRuntime {
   pdf: PDFDocument;
@@ -123,6 +125,17 @@ interface PdfTotals {
   vatRate: number;
 }
 
+interface PreparedPdfData {
+  customer: Required<Pick<QuotePdfCustomer, "name" | "address">> & Omit<QuotePdfCustomer, "name" | "address">;
+  lineItems: QuoteLineItem[];
+  totals: PdfTotals;
+  introText: string;
+  notesText: string;
+  closingBodyText: string;
+  paymentTermsText: string;
+  validUntilText: string;
+}
+
 const TABLE_COLUMNS: TableColumn[] = [
   { key: "position", title: "Pos.", width: 30 },
   { key: "label", title: "Bezeichnung", width: 205 },
@@ -133,9 +146,16 @@ const TABLE_COLUMNS: TableColumn[] = [
 ];
 
 export async function generateQuotePdf(payload: QuotePdfPayload): Promise<Uint8Array> {
-  const resolvedCustomer = await resolveCustomer(payload.customer);
-  const company = await resolveCompanySettings(payload.signerName);
-  const totals = calculatePdfTotals(payload);
+  const processStartedAt = Date.now();
+  const [resolvedCustomer, company] = await measurePdfStage("data-resolution", async () =>
+    Promise.all([
+      resolveCustomer(payload.customer),
+      resolveCompanySettings(payload.signerName),
+    ])
+  );
+  const prepared = await measurePdfStage("validation+template-prep", async () =>
+    preparePdfData(payload, company, resolvedCustomer)
+  );
 
   const pdf = await PDFDocument.create();
   pdf.registerFontkit(fontkit);
@@ -150,31 +170,41 @@ export async function generateQuotePdf(payload: QuotePdfPayload): Promise<Uint8A
 
   const runtime = createRuntime(pdf, font, fontBold);
 
-  drawHeader(runtime, payload, company, resolvedCustomer);
-  runtime.cursorY -= 12;
+  await measurePdfStage("pdf-render", async () => {
+    drawHeader(runtime, payload, company, prepared.customer);
+    runtime.cursorY -= 12;
 
-  drawIntroSection(runtime, payload, company);
-  runtime.cursorY -= 10;
+    drawIntroSection(runtime, payload, company, prepared.introText);
+    runtime.cursorY -= 10;
 
-  await drawLineItemTable(runtime, payload.lineItems, company.currency, company);
-  runtime.cursorY -= 12;
+    drawLineItemTable(runtime, prepared.lineItems, company.currency, company);
+    runtime.cursorY -= 12;
 
-  drawOnDemandServicesSection(runtime, payload.onDemandLineItems ?? [], company.currency, company);
-  runtime.cursorY -= 10;
+    drawOnDemandServicesSection(runtime, payload.onDemandLineItems ?? [], company.currency, company);
+    runtime.cursorY -= 10;
 
-  drawTotalsSection(runtime, totals, company.currency, company);
-  runtime.cursorY -= 10;
+    drawTotalsSection(runtime, prepared.totals, company.currency, company);
+    runtime.cursorY -= 10;
 
-  drawAdditionalInfoSection(runtime, payload, company);
-  runtime.cursorY -= 10;
+    drawAdditionalInfoSection(runtime, company, {
+      paymentTermsText: prepared.paymentTermsText,
+      validUntilText: prepared.validUntilText,
+      notesText: prepared.notesText,
+    });
+    runtime.cursorY -= 10;
 
-  drawClosingSection(runtime, company);
+    drawClosingSection(runtime, company, {
+      closingBodyText: prepared.closingBodyText,
+    });
 
-  if (payload.planSnapshotDataUrl) {
-    await drawAppendixPage(runtime, payload.planSnapshotDataUrl, payload.project.name, company);
-  }
+    if (payload.planSnapshotDataUrl) {
+      await drawAppendixPage(runtime, payload.planSnapshotDataUrl, payload.project.name, company);
+    }
+  });
 
-  return pdf.save();
+  const bytes = await measurePdfStage("pdf-save", async () => pdf.save());
+  logPdfTiming("total", Date.now() - processStartedAt);
+  return bytes;
 }
 
 export function buildQuotePdfFileName(input: {
@@ -354,9 +384,12 @@ async function drawHeaderLogo(runtime: DocumentRuntime, logoUrl: string, x: numb
   }
 }
 
-function drawIntroSection(runtime: DocumentRuntime, payload: QuotePdfPayload, company: CompanyBranding): void {
-  const introText = payload.generatedText?.trim() || company.introText?.trim() || "Vielen Dank für Ihre Anfrage. Nachfolgend erhalten Sie unser Angebot.";
-
+function drawIntroSection(
+  runtime: DocumentRuntime,
+  payload: QuotePdfPayload,
+  company: CompanyBranding,
+  introText: string
+): void {
   const blockHeight = 140;
   ensureSpace(runtime, blockHeight, company);
 
@@ -408,12 +441,12 @@ function drawIntroSection(runtime: DocumentRuntime, payload: QuotePdfPayload, co
   runtime.cursorY -= boxHeight + 4;
 }
 
-async function drawLineItemTable(
+function drawLineItemTable(
   runtime: DocumentRuntime,
   lineItems: QuoteLineItem[],
   currency: string,
   company: CompanyBranding
-): Promise<void> {
+): void {
   drawSectionTitle(runtime, "Leistungs-/Positionsübersicht", company);
 
   const drawTableHead = () => {
@@ -540,17 +573,22 @@ function drawTotalsSection(runtime: DocumentRuntime, totals: PdfTotals, currency
   runtime.cursorY -= boxHeight + 4;
 }
 
-function drawAdditionalInfoSection(runtime: DocumentRuntime, payload: QuotePdfPayload, company: CompanyBranding): void {
+function drawAdditionalInfoSection(
+  runtime: DocumentRuntime,
+  company: CompanyBranding,
+  input: {
+    paymentTermsText: string;
+    validUntilText: string;
+    notesText: string;
+  }
+): void {
   ensureSpace(runtime, 200, company);
   drawSectionTitle(runtime, "Zusatzangaben", company);
-
-  const validUntil = payload.validUntil ? formatIsoDate(payload.validUntil) : formatIsoDate(defaultValidUntil());
-  const notes = payload.notes?.trim() || payload.conceptText?.trim() || "-";
 
   const boxX = MARGIN_LEFT;
   const boxW = A4_WIDTH - MARGIN_LEFT - MARGIN_RIGHT;
   const notesValueX = getKeyValueValueX("Hinweise", boxX + BLOCK_PADDING_X, runtime.fontBold, 10);
-  const noteLines = wrapText(notes, runtime.font, 10, boxX + boxW - BLOCK_PADDING_X - notesValueX, 4);
+  const noteLines = wrapText(input.notesText, runtime.font, 10, boxX + boxW - BLOCK_PADDING_X - notesValueX, 4);
   const infoHeight = 26;
   const notesHeight = Math.max(18, noteLines.length * 12);
   const legalTerms = company.legalTermsText?.trim() ?? "";
@@ -574,7 +612,7 @@ function drawAdditionalInfoSection(runtime: DocumentRuntime, payload: QuotePdfPa
   drawKeyValue(
     runtime.page,
     "Zahlungsbedingungen",
-    company.paymentTerms || "Zahlbar innerhalb von 14 Tagen ohne Abzug.",
+    input.paymentTermsText,
     boxX + BLOCK_PADDING_X,
     y,
     runtime.font,
@@ -584,7 +622,7 @@ function drawAdditionalInfoSection(runtime: DocumentRuntime, payload: QuotePdfPa
   drawKeyValue(
     runtime.page,
     "Angebotsgültigkeit",
-    validUntil,
+    input.validUntilText,
     boxX + BLOCK_PADDING_X,
     y,
     runtime.font,
@@ -677,15 +715,20 @@ function drawOnDemandServicesSection(
   });
 }
 
-function drawClosingSection(runtime: DocumentRuntime, company: CompanyBranding): void {
+function drawClosingSection(
+  runtime: DocumentRuntime,
+  company: CompanyBranding,
+  input: {
+    closingBodyText: string;
+  }
+): void {
   ensureSpace(runtime, 120, company);
   drawSectionTitle(runtime, "Abschluss", company);
 
-  const closingText = company.closingText?.trim() || "Für Rückfragen stehen wir Ihnen jederzeit gern zur Verfügung.";
   const signerName = company.signatureName?.trim() || company.contactPerson?.trim() || company.companyName || "Ihr Team";
   const boxX = MARGIN_LEFT;
   const boxW = A4_WIDTH - MARGIN_LEFT - MARGIN_RIGHT;
-  const lines = wrapText(closingText, runtime.font, 10, boxW - (BLOCK_PADDING_X * 2), 4);
+  const lines = wrapText(input.closingBodyText, runtime.font, 10, boxW - (BLOCK_PADDING_X * 2), 4);
   const boxHeight = (BLOCK_PADDING_Y * 2) + Math.max(lines.length * 12, 16) + 22;
 
   runtime.page.drawRectangle({
@@ -1095,6 +1138,219 @@ function calculatePdfTotals(payload: QuotePdfPayload): PdfTotals {
   };
 }
 
+function preparePdfData(
+  payload: QuotePdfPayload,
+  company: CompanyBranding,
+  customer: Required<Pick<QuotePdfCustomer, "name" | "address">> & Omit<QuotePdfCustomer, "name" | "address">
+): PreparedPdfData {
+  const lineItems = payload.lineItems.map((item) => normalizeLineItemForPdf(item));
+  const totals = calculatePdfTotals({ ...payload, lineItems });
+  validateOfferForPdf({ payload, lineItems, totals, customer });
+
+  const introText = buildDeterministicOfferText({
+    projectName: payload.project.name,
+    location: payload.project.location,
+    customerName: customer.name,
+    durationMonths: payload.project.durationMonths,
+  });
+  const notesText = sanitizeRichTextToPlainText(payload.notes || payload.conceptText || "-");
+  const paymentTermsText = sanitizeRichTextToPlainText(company.paymentTerms || "Zahlbar innerhalb von 14 Tagen ohne Abzug.");
+  const validUntilText = formatIsoDate(payload.validUntil ? payload.validUntil : defaultValidUntil());
+  const closingBodyText = sanitizeClosingBody(company.closingText || "Für Rückfragen stehen wir Ihnen jederzeit gern zur Verfügung.");
+
+  return {
+    customer,
+    lineItems,
+    totals,
+    introText,
+    notesText,
+    closingBodyText,
+    paymentTermsText,
+    validUntilText,
+  };
+}
+
+function normalizeLineItemForPdf(item: QuoteLineItem): QuoteLineItem {
+  const quantity = Number.isFinite(item.quantity) ? Math.max(0, item.quantity) : 0;
+  const unitPrice = Number.isFinite(item.unitPrice) ? Math.max(0, item.unitPrice) : 0;
+  const computedTotal = roundCurrency(quantity * unitPrice);
+  return {
+    ...item,
+    label: sanitizeRichTextToPlainText(item.label || "Position"),
+    description: item.description ? sanitizeRichTextToPlainText(item.description) : undefined,
+    unit: sanitizeRichTextToPlainText(item.unit || "-"),
+    quantity,
+    unitPrice,
+    totalPrice: computedTotal,
+  };
+}
+
+function validateOfferForPdf(input: {
+  payload: QuotePdfPayload;
+  lineItems: QuoteLineItem[];
+  totals: PdfTotals;
+  customer: Required<Pick<QuotePdfCustomer, "name" | "address">> & Omit<QuotePdfCustomer, "name" | "address">;
+}): void {
+  const errors: string[] = [];
+  const payload = input.payload;
+  if (!payload.quoteNumber?.trim()) {
+    errors.push("Angebotsnummer fehlt.");
+  }
+  if (!payload.issueDate?.trim()) {
+    errors.push("Ausstellungsdatum fehlt.");
+  }
+  if (!payload.project?.name?.trim()) {
+    errors.push("Projektname fehlt.");
+  }
+  if (!input.customer.name?.trim()) {
+    errors.push("Kundenname fehlt.");
+  }
+  if (!Array.isArray(input.lineItems) || input.lineItems.length === 0) {
+    errors.push("Es sind keine Positionen vorhanden.");
+  }
+
+  input.lineItems.forEach((item, index) => {
+    if (!item.label?.trim()) {
+      errors.push(`Position ${index + 1}: Bezeichnung fehlt.`);
+    }
+    if (!item.unit?.trim()) {
+      errors.push(`Position ${index + 1}: Einheit fehlt.`);
+    }
+    if (!Number.isFinite(item.quantity) || item.quantity < 0) {
+      errors.push(`Position ${index + 1}: Menge ist ungültig.`);
+    }
+    if (!Number.isFinite(item.unitPrice) || item.unitPrice < 0) {
+      errors.push(`Position ${index + 1}: Einzelpreis ist ungültig.`);
+    }
+    if (!Number.isFinite(item.totalPrice) || item.totalPrice < 0) {
+      errors.push(`Position ${index + 1}: Gesamtpreis ist ungültig.`);
+    }
+
+    const expected = roundCurrency(item.quantity * item.unitPrice);
+    const delta = Math.abs(expected - roundCurrency(item.totalPrice));
+    if (delta > 0.01) {
+      errors.push(`Position ${index + 1}: Gesamtpreis stimmt nicht zu Menge x Einzelpreis.`);
+    }
+
+    if (item.billingMode === "recurring" && item.interval === "once") {
+      errors.push(`Position ${index + 1}: Widerspruch zwischen wiederkehrend und Intervall einmalig.`);
+    }
+    if (item.billingMode === "one_time" && item.interval !== "once") {
+      errors.push(`Position ${index + 1}: Widerspruch zwischen einmalig und Intervall.`);
+    }
+  });
+
+  const monthly = roundCurrency(
+    input.lineItems.filter((item) => item.billingMode === "recurring").reduce((sum, item) => sum + item.totalPrice, 0)
+  );
+  const oneTime = roundCurrency(
+    input.lineItems.filter((item) => item.billingMode !== "recurring").reduce((sum, item) => sum + item.totalPrice, 0)
+  );
+  const subtotal = roundCurrency(monthly + oneTime);
+  const net = roundCurrency(Math.max(0, subtotal - input.totals.discountAmount));
+  const gross = roundCurrency(net * (1 + input.totals.vatRate));
+
+  if (Math.abs(monthly - input.totals.monthlyTotal) > 0.01) {
+    errors.push("Summenblock: Wiederkehrend ist inkonsistent.");
+  }
+  if (Math.abs(oneTime - input.totals.oneTimeTotal) > 0.01) {
+    errors.push("Summenblock: Einmalig ist inkonsistent.");
+  }
+  if (Math.abs(subtotal - input.totals.subtotal) > 0.01) {
+    errors.push("Summenblock: Zwischensumme ist inkonsistent.");
+  }
+  if (Math.abs(net - input.totals.totalNet) > 0.01) {
+    errors.push("Summenblock: Netto ist inkonsistent.");
+  }
+  if (Math.abs(gross - input.totals.totalGross) > 0.01) {
+    errors.push("Summenblock: Brutto ist inkonsistent.");
+  }
+  if (Math.abs(monthly - roundCurrency(sanitizeAmount(payload.monthlyTotal))) > 0.01) {
+    errors.push("Payload-Summe: monthlyTotal ist inkonsistent.");
+  }
+  if (Math.abs(oneTime - roundCurrency(sanitizeAmount(payload.oneTimeTotal))) > 0.01) {
+    errors.push("Payload-Summe: oneTimeTotal ist inkonsistent.");
+  }
+  if (Math.abs(net - roundCurrency(sanitizeAmount(payload.totalNet))) > 0.01) {
+    errors.push("Payload-Summe: totalNet ist inkonsistent.");
+  }
+  if (Math.abs(gross - roundCurrency(sanitizeAmount(payload.totalGross))) > 0.01) {
+    errors.push("Payload-Summe: totalGross ist inkonsistent.");
+  }
+
+  if (errors.length > 0) {
+    throw new Error(`PDF-Validierung fehlgeschlagen: ${errors.join(" | ")}`);
+  }
+}
+
+function sanitizeRichTextToPlainText(value: string): string {
+  return normalizeParagraphs(
+    (value || "")
+      .replace(/```[\s\S]*?```/g, " ")
+      .replace(/`([^`]+)`/g, "$1")
+      .replace(/^#{1,6}\s+/gm, "")
+      .replace(/[*_]{1,3}([^*_]+)[*_]{1,3}/g, "$1")
+      .replace(/\[(.*?)\]\((.*?)\)/g, "$1")
+      .replace(/[>*]+/g, " ")
+      .replace(/\r\n/g, "\n")
+  );
+}
+
+function normalizeParagraphs(value: string): string {
+  const normalized = value
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .split("\n")
+    .map((line) => line.trim())
+    .join("\n")
+    .trim();
+  return normalized.length > 0 ? normalized : "-";
+}
+
+function buildDeterministicOfferText(input: {
+  projectName: string;
+  location: string;
+  customerName: string;
+  durationMonths: number;
+}): string {
+  return normalizeParagraphs(
+    `Vielen Dank für Ihre Anfrage. Hiermit erhalten Sie unser Angebot für das Projekt "${input.projectName}" bei ${input.customerName}. `
+    + `Der Einsatzort ist ${input.location}. Die angebotenen Leistungen werden gemäß Positionsübersicht und Summenblock abgerechnet. `
+    + `Die Laufzeit beträgt ${Math.max(1, input.durationMonths)} Monat(e).`
+  );
+}
+
+function sanitizeClosingBody(value: string): string {
+  const normalized = sanitizeRichTextToPlainText(value)
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .filter((line) => !/^mit\s+freundlichen\s+gr(ü|u)ßen\.?$/i.test(line));
+  if (normalized.length === 0) {
+    return "Für Rückfragen stehen wir Ihnen jederzeit gern zur Verfügung.";
+  }
+  return normalizeParagraphs(normalized.join("\n"));
+}
+
+async function measurePdfStage<T>(stage: string, task: () => Promise<T> | T): Promise<T> {
+  const startedAt = Date.now();
+  try {
+    const result = await task();
+    logPdfTiming(stage, Date.now() - startedAt);
+    return result;
+  } catch (error) {
+    logPdfTiming(`${stage}:failed`, Date.now() - startedAt);
+    throw error;
+  }
+}
+
+function logPdfTiming(stage: string, durationMs: number): void {
+  if (!PDF_DEBUG_TIMING) {
+    return;
+  }
+  console.log(`[pdf] ${stage} ${durationMs}ms`);
+}
+
 function sanitizeAmount(value: number): number {
   return Number.isFinite(value) ? value : 0;
 }
@@ -1322,6 +1578,17 @@ function decodeDataUrl(dataUrl: string): { mime: string; bytes: Uint8Array } {
 }
 
 async function loadPdfFontResource(publicRelativePath: string): Promise<Uint8Array> {
+  const cached = PDF_FONT_CACHE.get(publicRelativePath);
+  if (cached) {
+    return cached;
+  }
+
+  const loaderPromise = loadPdfFontResourceUncached(publicRelativePath);
+  PDF_FONT_CACHE.set(publicRelativePath, loaderPromise);
+  return loaderPromise;
+}
+
+async function loadPdfFontResourceUncached(publicRelativePath: string): Promise<Uint8Array> {
   const normalizedPath = publicRelativePath.replace(/^\/+/, "");
 
   if (typeof window === "undefined") {
