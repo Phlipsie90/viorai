@@ -39,7 +39,6 @@ interface DocumentRuntime {
   font: PDFFont;
   fontBold: PDFFont;
   page: PDFPage;
-  pageNumber: number;
   cursorY: number;
 }
 
@@ -132,6 +131,7 @@ interface PreparedPdfData {
   introText: string;
   notesText: string;
   closingBodyText: string;
+  serviceScopeText: string;
   paymentTermsText: string;
   validUntilText: string;
 }
@@ -171,10 +171,10 @@ export async function generateQuotePdf(payload: QuotePdfPayload): Promise<Uint8A
   const runtime = createRuntime(pdf, font, fontBold);
 
   await measurePdfStage("pdf-render", async () => {
-    drawHeader(runtime, payload, company, prepared.customer);
+    await drawHeader(runtime, payload, company, prepared.customer);
     runtime.cursorY -= 12;
 
-    drawIntroSection(runtime, payload, company, prepared.introText);
+    drawIntroSection(runtime, payload, company, prepared.introText, prepared.serviceScopeText);
     runtime.cursorY -= 10;
 
     drawLineItemTable(runtime, prepared.lineItems, company.currency, company);
@@ -200,6 +200,8 @@ export async function generateQuotePdf(payload: QuotePdfPayload): Promise<Uint8A
     if (payload.planSnapshotDataUrl) {
       await drawAppendixPage(runtime, payload.planSnapshotDataUrl, payload.project.name, company);
     }
+
+    renderFooters(runtime, company);
   });
 
   const bytes = await measurePdfStage("pdf-save", async () => pdf.save());
@@ -237,15 +239,12 @@ function createRuntime(pdf: PDFDocument, font: PDFFont, fontBold: PDFFont): Docu
     font,
     fontBold,
     page,
-    pageNumber: 1,
     cursorY: A4_HEIGHT - MARGIN_TOP,
   };
 }
 
 function addPage(runtime: DocumentRuntime, company: CompanyBranding): void {
-  drawPageFooter(runtime.page, runtime.pageNumber, runtime.font, company);
   runtime.page = runtime.pdf.addPage([A4_WIDTH, A4_HEIGHT]);
-  runtime.pageNumber += 1;
   runtime.cursorY = A4_HEIGHT - MARGIN_TOP;
 }
 
@@ -273,12 +272,12 @@ async function loadFonts(pdf: PDFDocument): Promise<{ font: PDFFont; fontBold: P
   }
 }
 
-function drawHeader(
+async function drawHeader(
   runtime: DocumentRuntime,
   payload: QuotePdfPayload,
   company: CompanyBranding,
   customer: Required<Pick<QuotePdfCustomer, "name" | "address">> & Omit<QuotePdfCustomer, "name" | "address">
-): void {
+): Promise<void> {
   const { page, font, fontBold } = runtime;
   const contentWidth = A4_WIDTH - MARGIN_LEFT - MARGIN_RIGHT;
 
@@ -293,7 +292,7 @@ function drawHeader(
   const senderY = runtime.cursorY;
 
   if (company.logoUrl) {
-    void drawHeaderLogo(runtime, company.logoUrl, senderX, senderY);
+    await drawHeaderLogo(runtime.page, runtime.pdf, company.logoUrl, senderX, senderY);
   }
 
   const textStartX = senderX + 112;
@@ -362,9 +361,9 @@ function drawHeader(
   runtime.cursorY -= 182;
 }
 
-async function drawHeaderLogo(runtime: DocumentRuntime, logoUrl: string, x: number, y: number): Promise<void> {
+async function drawHeaderLogo(page: PDFPage, pdf: PDFDocument, logoUrl: string, x: number, y: number): Promise<void> {
   try {
-    const logo = await embedImage(runtime.pdf, logoUrl);
+    const logo = await embedImage(pdf, logoUrl);
     if (!logo) {
       return;
     }
@@ -373,8 +372,9 @@ async function drawHeaderLogo(runtime: DocumentRuntime, logoUrl: string, x: numb
     const maxHeight = 48;
     const scale = Math.min(maxWidth / logo.width, maxHeight / logo.height, 1);
 
-    runtime.page.drawImage(logo.ref, {
-      x,
+    const rightX = A4_WIDTH - MARGIN_RIGHT - (logo.width * scale);
+    page.drawImage(logo.ref, {
+      x: Math.max(x, rightX),
       y: y - logo.height * scale + 6,
       width: logo.width * scale,
       height: logo.height * scale,
@@ -388,57 +388,125 @@ function drawIntroSection(
   runtime: DocumentRuntime,
   payload: QuotePdfPayload,
   company: CompanyBranding,
-  introText: string
+  introText: string,
+  serviceScopeText: string
 ): void {
-  const blockHeight = 140;
-  ensureSpace(runtime, blockHeight, company);
+  const leftBoxWidth = 210;
+  const gap = 14;
+  const rightBoxWidth = A4_WIDTH - MARGIN_LEFT - MARGIN_RIGHT - leftBoxWidth - gap;
+  const leftBoxHeight = 78;
+  const rightIntroLines = wrapText(introText, runtime.font, 10, rightBoxWidth - (BLOCK_PADDING_X * 2), 6);
+  const rightScopeLines = wrapText(serviceScopeText, runtime.font, 10, rightBoxWidth - (BLOCK_PADDING_X * 2), 8);
+  const rightBoxHeight = Math.max(110, 24 + (rightIntroLines.length * 12) + 14 + (rightScopeLines.length * 12));
+  const totalHeight = Math.max(leftBoxHeight, rightBoxHeight) + SECTION_TITLE_HEIGHT + SECTION_GAP_AFTER_TITLE + 14;
+  ensureSpace(runtime, totalHeight, company);
 
   drawSectionTitle(runtime, "Einleitung", company);
 
-  const boxX = MARGIN_LEFT;
-  const boxW = A4_WIDTH - MARGIN_LEFT - MARGIN_RIGHT;
-  const paragraphWidth = boxW - (BLOCK_PADDING_X * 2);
-  const introLines = wrapText(introText, runtime.font, 10, paragraphWidth, 5);
-  const introHeight = Math.max(16, introLines.length * 12);
-  const infoRowsHeight = 42;
-  const boxHeight = (BLOCK_PADDING_Y * 2) + introHeight + infoRowsHeight + 6;
+  const leftX = MARGIN_LEFT;
+  const rightX = leftX + leftBoxWidth + gap;
+  const topY = runtime.cursorY;
 
   runtime.page.drawRectangle({
-    x: boxX,
-    y: runtime.cursorY - boxHeight,
-    width: boxW,
-    height: boxHeight,
+    x: leftX,
+    y: topY - leftBoxHeight,
+    width: leftBoxWidth,
+    height: leftBoxHeight,
     color: rgb(0.99, 0.992, 0.996),
     borderColor: COLOR_LINE,
     borderWidth: 1,
   });
 
-  let y = drawLines(
-    runtime.page,
-    introLines,
-    boxX + BLOCK_PADDING_X,
-    runtime.cursorY - BLOCK_PADDING_Y - 1,
-    10,
-    12,
-    runtime.font,
-    COLOR_TEXT
-  );
-  y -= 8;
+  let leftY = topY - BLOCK_PADDING_Y - 1;
+  drawKeyValue(runtime.page, "Projektname", payload.project.name, leftX + BLOCK_PADDING_X, leftY, runtime.font, runtime.fontBold);
+  leftY -= 20;
+  drawKeyValue(runtime.page, "Einsatzort", payload.project.location, leftX + BLOCK_PADDING_X, leftY, runtime.font, runtime.fontBold);
+  leftY -= 20;
+  drawKeyValue(runtime.page, "Laufzeit", `${payload.project.durationMonths} Monat(e)`, leftX + BLOCK_PADDING_X, leftY, runtime.font, runtime.fontBold);
 
-  drawKeyValue(runtime.page, "Projektname", payload.project.name, boxX + BLOCK_PADDING_X, y, runtime.font, runtime.fontBold);
-  y -= 14;
-  drawKeyValue(runtime.page, "Einsatzort", payload.project.location, boxX + BLOCK_PADDING_X, y, runtime.font, runtime.fontBold);
-  y -= 14;
-  drawKeyValue(
-    runtime.page,
-    "Laufzeit",
-    `${payload.project.durationMonths} Monat(e)`,
-    boxX + BLOCK_PADDING_X,
-    y,
-    runtime.font,
-    runtime.fontBold
-  );
-  runtime.cursorY -= boxHeight + 4;
+  runtime.page.drawRectangle({
+    x: rightX,
+    y: topY - rightBoxHeight,
+    width: rightBoxWidth,
+    height: rightBoxHeight,
+    color: rgb(0.99, 0.992, 0.996),
+    borderColor: COLOR_LINE,
+    borderWidth: 1,
+  });
+
+  let rightY = topY - BLOCK_PADDING_Y - 1;
+  drawText(runtime.page, "Einleitung", rightX + BLOCK_PADDING_X, rightY, 10, runtime.fontBold);
+  rightY -= 14;
+  rightY = drawLines(runtime.page, rightIntroLines, rightX + BLOCK_PADDING_X, rightY, 10, 12, runtime.font, COLOR_TEXT);
+  rightY -= 8;
+  drawText(runtime.page, "Leistungsumfang", rightX + BLOCK_PADDING_X, rightY, 10, runtime.fontBold);
+  rightY -= 14;
+  drawLines(runtime.page, rightScopeLines, rightX + BLOCK_PADDING_X, rightY, 10, 12, runtime.font, COLOR_TEXT);
+
+  runtime.cursorY -= Math.max(leftBoxHeight, rightBoxHeight) + 8;
+}
+
+function drawAdditionalInfoSection(
+  runtime: DocumentRuntime,
+  company: CompanyBranding,
+  input: {
+    paymentTermsText: string;
+    validUntilText: string;
+    notesText: string;
+  }
+): void {
+  ensureSpace(runtime, 90, company);
+  drawSectionTitle(runtime, "Zusatzangaben", company);
+
+  drawInfoRow(runtime, "Zahlungsbedingungen", input.paymentTermsText, company);
+  drawInfoRow(runtime, "Angebotsgültigkeit", input.validUntilText, company);
+
+  ensureSpace(runtime, 24, company);
+  drawText(runtime.page, "Hinweise:", MARGIN_LEFT + BLOCK_PADDING_X, runtime.cursorY - 2, 10, runtime.fontBold);
+  runtime.cursorY -= 16;
+  renderSectionWithAutoPageBreak(runtime, wrapText(input.notesText, runtime.font, 10, A4_WIDTH - MARGIN_LEFT - MARGIN_RIGHT - (BLOCK_PADDING_X * 2), 120), 10, 12, company, COLOR_TEXT);
+
+  const legalTerms = company.legalTermsText?.trim() ?? "";
+  if (legalTerms.length > 0) {
+    runtime.cursorY -= 6;
+    ensureSpace(runtime, 24, company);
+    drawText(runtime.page, "AGB / Vertragsbedingungen / Datenschutz:", MARGIN_LEFT + BLOCK_PADDING_X, runtime.cursorY - 2, 9, runtime.fontBold, COLOR_MUTED);
+    runtime.cursorY -= 16;
+    renderSectionWithAutoPageBreak(runtime, wrapText(legalTerms, runtime.font, 9, A4_WIDTH - MARGIN_LEFT - MARGIN_RIGHT - (BLOCK_PADDING_X * 2), 200), 9, 11, company, COLOR_MUTED);
+  }
+
+  runtime.cursorY -= 6;
+}
+
+function drawInfoRow(runtime: DocumentRuntime, label: string, value: string, company: CompanyBranding): void {
+  ensureSpace(runtime, 24, company);
+  const rowY = runtime.cursorY;
+  drawText(runtime.page, `${label}:`, MARGIN_LEFT + BLOCK_PADDING_X, rowY - 2, 9.5, runtime.fontBold, COLOR_TEXT);
+  drawText(runtime.page, value || "-", MARGIN_LEFT + 130, rowY - 2, 9.5, runtime.font, COLOR_TEXT);
+  runtime.page.drawRectangle({
+    x: MARGIN_LEFT,
+    y: rowY - 18,
+    width: A4_WIDTH - MARGIN_LEFT - MARGIN_RIGHT,
+    height: 20,
+    borderColor: COLOR_LINE,
+    borderWidth: 0.6,
+  });
+  runtime.cursorY -= 22;
+}
+
+function renderSectionWithAutoPageBreak(
+  runtime: DocumentRuntime,
+  lines: string[],
+  size: number,
+  lineHeight: number,
+  company: CompanyBranding,
+  color = COLOR_TEXT
+): void {
+  for (const line of lines) {
+    ensureSpace(runtime, lineHeight + 2, company);
+    drawText(runtime.page, line, MARGIN_LEFT + BLOCK_PADDING_X, runtime.cursorY - 2, size, runtime.font, color);
+    runtime.cursorY -= lineHeight;
+  }
 }
 
 function drawLineItemTable(
@@ -573,75 +641,6 @@ function drawTotalsSection(runtime: DocumentRuntime, totals: PdfTotals, currency
   runtime.cursorY -= boxHeight + 4;
 }
 
-function drawAdditionalInfoSection(
-  runtime: DocumentRuntime,
-  company: CompanyBranding,
-  input: {
-    paymentTermsText: string;
-    validUntilText: string;
-    notesText: string;
-  }
-): void {
-  ensureSpace(runtime, 200, company);
-  drawSectionTitle(runtime, "Zusatzangaben", company);
-
-  const boxX = MARGIN_LEFT;
-  const boxW = A4_WIDTH - MARGIN_LEFT - MARGIN_RIGHT;
-  const notesValueX = getKeyValueValueX("Hinweise", boxX + BLOCK_PADDING_X, runtime.fontBold, 10);
-  const noteLines = wrapText(input.notesText, runtime.font, 10, boxX + boxW - BLOCK_PADDING_X - notesValueX, 4);
-  const infoHeight = 26;
-  const notesHeight = Math.max(18, noteLines.length * 12);
-  const legalTerms = company.legalTermsText?.trim() ?? "";
-  const legalLines = legalTerms.length > 0
-    ? wrapText(legalTerms, runtime.font, 9, boxW - (BLOCK_PADDING_X * 2), 8)
-    : [];
-  const legalHeight = legalLines.length > 0 ? legalLines.length * 11 + 18 : 0;
-  const boxHeight = (BLOCK_PADDING_Y * 2) + infoHeight + 12 + notesHeight + legalHeight;
-
-  runtime.page.drawRectangle({
-    x: boxX,
-    y: runtime.cursorY - boxHeight,
-    width: boxW,
-    height: boxHeight,
-    color: rgb(0.99, 0.992, 0.996),
-    borderColor: COLOR_LINE,
-    borderWidth: 1,
-  });
-
-  let y = runtime.cursorY - BLOCK_PADDING_Y - 1;
-  drawKeyValue(
-    runtime.page,
-    "Zahlungsbedingungen",
-    input.paymentTermsText,
-    boxX + BLOCK_PADDING_X,
-    y,
-    runtime.font,
-    runtime.fontBold
-  );
-  y -= 14;
-  drawKeyValue(
-    runtime.page,
-    "Angebotsgültigkeit",
-    input.validUntilText,
-    boxX + BLOCK_PADDING_X,
-    y,
-    runtime.font,
-    runtime.fontBold
-  );
-  y -= 16;
-
-  drawText(runtime.page, "Hinweise:", boxX + BLOCK_PADDING_X, y, 10, runtime.fontBold);
-  y = drawLines(runtime.page, noteLines, notesValueX, y, 10, 12, runtime.font, COLOR_TEXT);
-
-  if (legalLines.length > 0) {
-    y -= 10;
-    drawText(runtime.page, "AGB / Vertragsbedingungen / Datenschutz:", boxX + BLOCK_PADDING_X, y, 9, runtime.fontBold, COLOR_MUTED);
-    drawLines(runtime.page, legalLines, boxX + BLOCK_PADDING_X, y - 12, 9, 11, runtime.font, COLOR_MUTED);
-  }
-
-  runtime.cursorY -= boxHeight + 4;
-}
-
 function drawOnDemandServicesSection(
   runtime: DocumentRuntime,
   onDemandLineItems: QuoteLineItem[],
@@ -760,7 +759,6 @@ function drawClosingSection(
   drawKeyValue(runtime.page, "Kontakt", company.contactLine || buildSenderLines(company).join(" | "), boxX + BLOCK_PADDING_X, y, runtime.font, runtime.fontBold);
 
   runtime.cursorY -= boxHeight + 4;
-  drawPageFooter(runtime.page, runtime.pageNumber, runtime.font, company);
 }
 
 async function drawAppendixPage(
@@ -777,7 +775,6 @@ async function drawAppendixPage(
   const image = await embedImage(runtime.pdf, snapshotDataUrl);
   if (!image) {
     drawText(runtime.page, "Anhang konnte nicht geladen werden.", MARGIN_LEFT, runtime.cursorY - 34, 10, runtime.font, COLOR_MUTED);
-    drawPageFooter(runtime.page, runtime.pageNumber, runtime.font, company);
     return;
   }
 
@@ -794,7 +791,6 @@ async function drawAppendixPage(
     height: drawH,
   });
 
-  drawPageFooter(runtime.page, runtime.pageNumber, runtime.font, company);
 }
 
 function drawSectionTitle(runtime: DocumentRuntime, title: string, company: CompanyBranding): void {
@@ -822,7 +818,7 @@ function drawSectionTitle(runtime: DocumentRuntime, title: string, company: Comp
   runtime.cursorY -= SECTION_TITLE_HEIGHT + SECTION_GAP_AFTER_TITLE;
 }
 
-function drawPageFooter(page: PDFPage, pageNumber: number, font: PDFFont, company: CompanyBranding): void {
+function drawPageFooter(page: PDFPage, pageLabel: string, font: PDFFont, company: CompanyBranding): void {
   const footerTop = FOOTER_HEIGHT;
   const footerTextTop = footerTop + 6;
   const copyrightText = buildCopyrightFooterText(company);
@@ -840,11 +836,19 @@ function drawPageFooter(page: PDFPage, pageNumber: number, font: PDFFont, compan
     drawLines(page, lines, MARGIN_LEFT, footerTextTop, 8, 10, font, COLOR_MUTED);
   }
 
-  drawRightAlignedText(page, `Seite ${pageNumber}`, A4_WIDTH - MARGIN_RIGHT, footerTop + 6, 8, font, COLOR_MUTED);
+  drawRightAlignedText(page, pageLabel, A4_WIDTH - MARGIN_RIGHT, footerTop + 6, 8, font, COLOR_MUTED);
 
   const copyrightWidth = font.widthOfTextAtSize(normalizePdfText(copyrightText), 8);
   const centeredX = (A4_WIDTH - copyrightWidth) / 2;
   drawText(page, copyrightText, centeredX, 16, 8, font, rgb(0.45, 0.48, 0.53));
+}
+
+function renderFooters(runtime: DocumentRuntime, company: CompanyBranding): void {
+  const pages = runtime.pdf.getPages();
+  const total = pages.length;
+  pages.forEach((page, index) => {
+    drawPageFooter(page, `Seite ${index + 1} von ${total}`, runtime.font, company);
+  });
 }
 
 function buildCopyrightFooterText(company: CompanyBranding): string {
@@ -1154,6 +1158,7 @@ function preparePdfData(
     durationMonths: payload.project.durationMonths,
   });
   const notesText = sanitizeRichTextToPlainText(payload.notes || payload.conceptText || "-");
+  const serviceScopeText = sanitizeRichTextToPlainText(payload.generatedText || "Leistungsumfang gemäß Positionsübersicht.");
   const paymentTermsText = sanitizeRichTextToPlainText(company.paymentTerms || "Zahlbar innerhalb von 14 Tagen ohne Abzug.");
   const validUntilText = formatIsoDate(payload.validUntil ? payload.validUntil : defaultValidUntil());
   const closingBodyText = sanitizeClosingBody(company.closingText || "Für Rückfragen stehen wir Ihnen jederzeit gern zur Verfügung.");
@@ -1165,6 +1170,7 @@ function preparePdfData(
     introText,
     notesText,
     closingBodyText,
+    serviceScopeText,
     paymentTermsText,
     validUntilText,
   };
