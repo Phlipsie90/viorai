@@ -1,6 +1,7 @@
 import fontkit from "@pdf-lib/fontkit";
 import { PDFDocument, type PDFFont, type PDFImage, type PDFPage, rgb } from "pdf-lib";
 import type { QuoteLineItem } from "@/types";
+import { deriveQuoteTotalsFromLineItems } from "@/lib/pricing/calculator";
 import { localCustomerRepository } from "@/features/customers/repository";
 import { companySettingsRepository } from "@/features/company-settings/repository";
 import { getSupabaseClient, getSupabaseUserSafe } from "@/lib/supabase/client";
@@ -1115,30 +1116,20 @@ function sanitizeFileNameSegment(value: string): string {
 }
 
 function calculatePdfTotals(payload: QuotePdfPayload): PdfTotals {
-  const monthlyTotal = roundCurrency(
-    payload.lineItems
-      .filter((item) => item.billingMode === "recurring")
-      .reduce((sum, item) => sum + sanitizeAmount(item.totalPrice), 0)
-  );
-  const oneTimeTotal = roundCurrency(
-    payload.lineItems
-      .filter((item) => item.billingMode !== "recurring")
-      .reduce((sum, item) => sum + sanitizeAmount(item.totalPrice), 0)
-  );
-  const subtotal = roundCurrency(monthlyTotal + oneTimeTotal);
-  const discountAmount = roundCurrency(Math.max(0, sanitizeAmount(payload.discountAmount)));
-  const totalNet = roundCurrency(Math.max(0, subtotal - discountAmount));
-  const vatRate = sanitizeAmount(payload.vatRate);
-  const totalGross = roundCurrency(totalNet * (1 + vatRate));
+  const derived = deriveQuoteTotalsFromLineItems({
+    lineItems: payload.lineItems,
+    discountAmount: sanitizeAmount(payload.discountAmount),
+    vatRate: sanitizeAmount(payload.vatRate),
+  });
 
   return {
-    monthlyTotal,
-    oneTimeTotal,
-    subtotal,
-    discountAmount,
-    totalNet,
-    totalGross,
-    vatRate,
+    monthlyTotal: derived.monthlyTotal,
+    oneTimeTotal: derived.oneTimeTotal,
+    subtotal: derived.subtotal,
+    discountAmount: derived.discountAmount,
+    totalNet: derived.totalNet,
+    totalGross: derived.totalGross,
+    vatRate: derived.vatRate,
   };
 }
 
@@ -1246,42 +1237,52 @@ function validateOfferForPdf(input: {
     }
   });
 
-  const monthly = roundCurrency(
-    input.lineItems.filter((item) => item.billingMode === "recurring").reduce((sum, item) => sum + item.totalPrice, 0)
-  );
-  const oneTime = roundCurrency(
-    input.lineItems.filter((item) => item.billingMode !== "recurring").reduce((sum, item) => sum + item.totalPrice, 0)
-  );
-  const subtotal = roundCurrency(monthly + oneTime);
-  const net = roundCurrency(Math.max(0, subtotal - input.totals.discountAmount));
-  const gross = roundCurrency(net * (1 + input.totals.vatRate));
+  const serverTotals = deriveQuoteTotalsFromLineItems({
+    lineItems: input.lineItems,
+    discountAmount: input.totals.discountAmount,
+    vatRate: input.totals.vatRate,
+  });
 
-  if (Math.abs(monthly - input.totals.monthlyTotal) > 0.01) {
+  if (Math.abs(serverTotals.monthlyTotal - input.totals.monthlyTotal) > 0.01) {
     errors.push("Summenblock: Wiederkehrend ist inkonsistent.");
   }
-  if (Math.abs(oneTime - input.totals.oneTimeTotal) > 0.01) {
+  if (Math.abs(serverTotals.oneTimeTotal - input.totals.oneTimeTotal) > 0.01) {
     errors.push("Summenblock: Einmalig ist inkonsistent.");
   }
-  if (Math.abs(subtotal - input.totals.subtotal) > 0.01) {
+  if (Math.abs(serverTotals.subtotal - input.totals.subtotal) > 0.01) {
     errors.push("Summenblock: Zwischensumme ist inkonsistent.");
   }
-  if (Math.abs(net - input.totals.totalNet) > 0.01) {
+  if (Math.abs(serverTotals.totalNet - input.totals.totalNet) > 0.01) {
     errors.push("Summenblock: Netto ist inkonsistent.");
   }
-  if (Math.abs(gross - input.totals.totalGross) > 0.01) {
+  if (Math.abs(serverTotals.totalGross - input.totals.totalGross) > 0.01) {
     errors.push("Summenblock: Brutto ist inkonsistent.");
   }
-  if (Math.abs(monthly - roundCurrency(sanitizeAmount(payload.monthlyTotal))) > 0.01) {
-    errors.push("Payload-Summe: monthlyTotal ist inkonsistent.");
-  }
-  if (Math.abs(oneTime - roundCurrency(sanitizeAmount(payload.oneTimeTotal))) > 0.01) {
-    errors.push("Payload-Summe: oneTimeTotal ist inkonsistent.");
-  }
-  if (Math.abs(net - roundCurrency(sanitizeAmount(payload.totalNet))) > 0.01) {
-    errors.push("Payload-Summe: totalNet ist inkonsistent.");
-  }
-  if (Math.abs(gross - roundCurrency(sanitizeAmount(payload.totalGross))) > 0.01) {
-    errors.push("Payload-Summe: totalGross ist inkonsistent.");
+
+  const payloadMonthlyTotal = roundCurrency(sanitizeAmount(payload.monthlyTotal));
+  const payloadOneTimeTotal = roundCurrency(sanitizeAmount(payload.oneTimeTotal));
+  const payloadTotalNet = roundCurrency(sanitizeAmount(payload.totalNet));
+  const payloadTotalGross = roundCurrency(sanitizeAmount(payload.totalGross));
+  if (
+    Math.abs(serverTotals.monthlyTotal - payloadMonthlyTotal) > 0.01
+    || Math.abs(serverTotals.oneTimeTotal - payloadOneTimeTotal) > 0.01
+    || Math.abs(serverTotals.totalNet - payloadTotalNet) > 0.01
+    || Math.abs(serverTotals.totalGross - payloadTotalGross) > 0.01
+  ) {
+    console.warn("[pdf] Payload-Summen weichen von serverseitiger Berechnung ab. Es werden serverseitige Summen verwendet.", {
+      payload: {
+        monthlyTotal: payloadMonthlyTotal,
+        oneTimeTotal: payloadOneTimeTotal,
+        totalNet: payloadTotalNet,
+        totalGross: payloadTotalGross,
+      },
+      server: {
+        monthlyTotal: serverTotals.monthlyTotal,
+        oneTimeTotal: serverTotals.oneTimeTotal,
+        totalNet: serverTotals.totalNet,
+        totalGross: serverTotals.totalGross,
+      },
+    });
   }
 
   if (errors.length > 0) {

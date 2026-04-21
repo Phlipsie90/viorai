@@ -80,6 +80,12 @@ export interface QuoteTotalsResult {
   vatRate: number;
 }
 
+export interface DerivedQuoteTotalsInput {
+  lineItems: QuoteLineItem[];
+  discountAmount: number;
+  vatRate: number;
+}
+
 const TEMPLATE_RATE_FALLBACK = 1850;
 const DEFAULT_PERSONNEL_STUNDEN_PRO_TAG = 8;
 const DEFAULT_PERSONNEL_NACHT_STUNDEN_PRO_TAG = 0;
@@ -212,26 +218,43 @@ export function calculateQuoteTotals(input: QuoteTotalsInput): QuoteTotalsResult
     throw new Error("durationMonths must be an integer greater than 0");
   }
 
-  const safeVatRate = clampNumber(input.vatRate);
-  const safeDiscountAmount = clampCurrency(input.discountAmount);
   const normalizedLineItems = input.lineItems.map(normalizeLineItem);
-
-  const monthlyTotal = sumByBillingMode(normalizedLineItems, "recurring");
-  const oneTimeTotal = sumByBillingMode(normalizedLineItems, "one_time");
-
-  const subtotal = roundCurrency(monthlyTotal * input.durationMonths + oneTimeTotal);
-  const totalNet = Math.max(0, roundCurrency(subtotal - safeDiscountAmount));
-  const totalGross = roundCurrency(totalNet * (1 + safeVatRate));
+  const derivedTotals = deriveQuoteTotalsFromLineItems({
+    lineItems: normalizedLineItems,
+    discountAmount: input.discountAmount,
+    vatRate: input.vatRate,
+  });
 
   return {
     lineItems: normalizedLineItems,
     durationMonths: input.durationMonths,
-    monthlyTotal,
-    oneTimeTotal,
-    subtotal,
-    discountAmount: safeDiscountAmount,
-    totalNet,
-    totalGross,
+    monthlyTotal: derivedTotals.monthlyTotal,
+    oneTimeTotal: derivedTotals.oneTimeTotal,
+    subtotal: derivedTotals.subtotal,
+    discountAmount: derivedTotals.discountAmount,
+    totalNet: derivedTotals.totalNet,
+    totalGross: derivedTotals.totalGross,
+    vatRate: derivedTotals.vatRate,
+  };
+}
+
+export function deriveQuoteTotalsFromLineItems(input: DerivedQuoteTotalsInput): Omit<QuoteTotalsResult, "lineItems" | "durationMonths"> {
+  const normalizedLineItems = input.lineItems.map(normalizeLineItem);
+  const safeVatRate = clampNumber(input.vatRate);
+  const recurringTotalCents = sumByBillingModeInCents(normalizedLineItems, "recurring");
+  const oneTimeTotalCents = sumByBillingModeInCents(normalizedLineItems, "one_time");
+  const subtotalCents = recurringTotalCents + oneTimeTotalCents;
+  const discountAmountCents = toCurrencyCents(clampCurrency(input.discountAmount));
+  const totalNetCents = Math.max(0, subtotalCents - discountAmountCents);
+  const totalGrossCents = Math.round(totalNetCents * (1 + safeVatRate));
+
+  return {
+    monthlyTotal: fromCurrencyCents(recurringTotalCents),
+    oneTimeTotal: fromCurrencyCents(oneTimeTotalCents),
+    subtotal: fromCurrencyCents(subtotalCents),
+    discountAmount: fromCurrencyCents(discountAmountCents),
+    totalNet: fromCurrencyCents(totalNetCents),
+    totalGross: fromCurrencyCents(totalGrossCents),
     vatRate: safeVatRate,
   };
 }
@@ -804,6 +827,12 @@ function sumByBillingMode(items: QuoteLineItem[], billingMode: BillingMode): num
   );
 }
 
+function sumByBillingModeInCents(items: QuoteLineItem[], billingMode: BillingMode): number {
+  return items
+    .filter((item) => item.billingMode === billingMode)
+    .reduce((sum, item) => sum + toCurrencyCents(item.totalPrice), 0);
+}
+
 function getLineItemDefaults(type: QuoteLineItem["type"]): {
   billingMode: BillingMode;
   interval: BillingInterval;
@@ -984,4 +1013,15 @@ function clampCurrency(value: number): number {
 
 function roundCurrency(value: number): number {
   return Math.round(value * 100) / 100;
+}
+
+function toCurrencyCents(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  return Math.round(value * 100);
+}
+
+function fromCurrencyCents(value: number): number {
+  return roundCurrency(value / 100);
 }
