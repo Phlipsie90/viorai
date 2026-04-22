@@ -35,6 +35,8 @@ interface QuoteRow {
   total_gross?: number | null;
   pdf_storage_path?: string | null;
   pdf_public_url?: string | null;
+  tariff_snapshot?: Record<string, unknown> | null;
+  patrol_snapshot?: Record<string, unknown> | null;
   created_at: string;
   updated_at: string;
 }
@@ -50,7 +52,7 @@ interface QuoteStatusHistoryRow {
 }
 
 const QUOTE_SELECT_COLUMNS =
-  "id, tenant_id, number, customer_id, project_id, mode, service_type, positions, pricing, status, generated_text, concept_text, final_text, ai_input_summary, valid_until, sent_at, margin_target, subtotal_net, vat_amount, total_gross, pdf_storage_path, pdf_public_url, created_at, updated_at";
+  "id, tenant_id, number, customer_id, project_id, mode, service_type, positions, pricing, status, generated_text, concept_text, final_text, ai_input_summary, valid_until, sent_at, margin_target, subtotal_net, vat_amount, total_gross, pdf_storage_path, pdf_public_url, tariff_snapshot, patrol_snapshot, created_at, updated_at";
 const QUOTE_SELECT_COLUMNS_LEGACY =
   "id, tenant_id, customer_id, project_id, positions, pricing, status, generated_text, concept_text, ai_input_summary, valid_until, created_at, updated_at";
 
@@ -72,6 +74,8 @@ function isMissingColumnError(message?: string | null): boolean {
     || message.includes("column quotes.total_gross does not exist")
     || message.includes("column quotes.pdf_storage_path does not exist")
     || message.includes("column quotes.pdf_public_url does not exist")
+    || message.includes("column quotes.tariff_snapshot does not exist")
+    || message.includes("column quotes.patrol_snapshot does not exist")
     || message.includes("Could not find the 'number' column")
     || message.includes("Could not find the 'service_type' column")
     || message.includes("Could not find the 'sent_at' column")
@@ -83,6 +87,8 @@ function isMissingColumnError(message?: string | null): boolean {
     || message.includes("Could not find the 'total_gross' column")
     || message.includes("Could not find the 'pdf_storage_path' column")
     || message.includes("Could not find the 'pdf_public_url' column")
+    || message.includes("Could not find the 'tariff_snapshot' column")
+    || message.includes("Could not find the 'patrol_snapshot' column")
     || normalized.includes("within group is required for ordered-set aggregate mode");
 }
 
@@ -276,6 +282,8 @@ function mapRowToQuote(row: QuoteRow): Quote {
     totalGross: Number.isFinite(row.total_gross) ? Number(row.total_gross) : undefined,
     pdfStoragePath: row.pdf_storage_path ?? undefined,
     pdfPublicUrl: row.pdf_public_url ?? undefined,
+    tariffSnapshot: row.tariff_snapshot ?? undefined,
+    patrolSnapshot: row.patrol_snapshot ?? undefined,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -328,6 +336,8 @@ function toDbPayload(quote: Quote, tenantId: string, createdAt?: string) {
     total_gross: Number.isFinite(quote.totalGross) ? quote.totalGross : null,
     pdf_storage_path: quote.pdfStoragePath ?? null,
     pdf_public_url: quote.pdfPublicUrl ?? null,
+    tariff_snapshot: quote.tariffSnapshot ?? null,
+    patrol_snapshot: quote.patrolSnapshot ?? null,
     created_at: createdAt ?? quote.createdAt,
     updated_at: nowIsoTimestamp(),
   };

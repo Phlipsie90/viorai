@@ -112,7 +112,7 @@ export default function DashboardPage() {
           <div className="space-y-4">
             <p className="text-sm font-medium text-slate-500">Dashboard</p>
             <h1 className="text-4xl font-bold leading-tight text-slate-900">
-              Angebote in <span className="text-[var(--brand-accent)]">2 Minuten</span> erstellen.
+              Angebote im <span className="text-[var(--brand-accent)]">Command Center</span> erstellen.
             </h1>
             <p className="max-w-2xl text-sm text-slate-600">
               Hallo {greetingName}, starte direkt in den Schnellangebot-Flow. Kunde, Einsatzdaten und Leistung erfassen,
@@ -120,10 +120,10 @@ export default function DashboardPage() {
             </p>
             <div className="flex flex-wrap items-center gap-3">
               <Link
-                href="/planner?mode=schnellangebot&quelle=dashboard"
+                href="/command-center"
                 className="inline-flex items-center justify-center rounded-xl bg-[var(--brand-accent)] px-5 py-3 text-sm font-semibold text-white shadow-[0_14px_34px_rgba(249,115,22,0.28)] transition hover:brightness-95"
               >
-                Neues Angebot in 2 Min erstellen
+                Command Center öffnen
               </Link>
               <span className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-600">
                 Kunde {"->"} Leistung {"->"} Text {"->"} PDF

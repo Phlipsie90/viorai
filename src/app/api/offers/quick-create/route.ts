@@ -1,10 +1,13 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { generateOfferTextWithDeepSeek } from "@/features/ai/deepseek";
 import { buildOfferDraft, type OfferMode } from "@/features/offers/build-offer-draft";
+import { buildIntegratedOfferDraft, type TariffTimeModel } from "@/features/offers/integrated-engine";
 import { isQuoteServiceType, type QuoteQuickTemplateId, type QuoteServiceType } from "@/features/quotes/service-types";
 import type { CompanySettings } from "@/features/company-settings/types";
 import { buildQuotePdfFileName, generateQuotePdf } from "@/lib/pdf/generator";
 import type { QuoteLineItem } from "@/types";
+import { loadTariffDataset, type TariffContext } from "@/lib/tariff/engine";
+import type { PatrolInput } from "@/lib/patrol/engine";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -35,6 +38,23 @@ interface QuickCreateRequestBody {
     serviceType: QuoteServiceType;
     quickTemplateId?: QuoteQuickTemplateId;
     autoGenerateText?: boolean;
+    targetMargin?: number;
+    timeModel?: TariffTimeModel;
+    tariffContext?: TariffContext;
+    serviceContext?: string;
+    wageGroup?: string;
+    dutyDurationHours?: number;
+    shiftStartIso?: string;
+    shiftEndIso?: string;
+    employerCostFactor?: number;
+    patrolInput?: PatrolInput;
+    plannerOutput?: {
+      cameras?: number;
+      towers?: number;
+      recorders?: number;
+      switches?: number;
+      obstacles?: number;
+    };
   };
 }
 
@@ -88,6 +108,8 @@ function isLegacyQuotesColumnError(message?: string | null): boolean {
     || message.includes("column quotes.total_gross does not exist")
     || message.includes("column quotes.pdf_storage_path does not exist")
     || message.includes("column quotes.pdf_public_url does not exist")
+    || message.includes("column quotes.tariff_snapshot does not exist")
+    || message.includes("column quotes.patrol_snapshot does not exist")
     || normalized.includes("within group is required for ordered-set aggregate mode");
 }
 
@@ -106,6 +128,27 @@ function parseRuntimeMonths(runtimeLabel?: string): number {
 
   const parsed = Number(match[0]);
   return Number.isFinite(parsed) && parsed > 0 ? Math.max(1, Math.round(parsed)) : 1;
+}
+
+function parseTargetMargin(targetMargin: unknown): number {
+  const parsed = Number(targetMargin);
+  if (!Number.isFinite(parsed)) {
+    return 0.22;
+  }
+  return Math.min(0.6, Math.max(0.05, parsed));
+}
+
+function parseTimeModel(timeModel: unknown): TariffTimeModel {
+  if (
+    timeModel === "day"
+    || timeModel === "night"
+    || timeModel === "twentyfourseven"
+    || timeModel === "patrol"
+  ) {
+    return timeModel;
+  }
+
+  return "day";
 }
 
 function buildFallbackText(input: {
@@ -334,6 +377,10 @@ async function createQuote(params: {
   generatedText: string;
   conceptText: string;
   finalText: string;
+  aiInputSummary?: string;
+  marginTarget?: number;
+  tariffSnapshot?: Record<string, unknown>;
+  patrolSnapshot?: Record<string, unknown>;
   validUntil: string;
   built: ReturnType<typeof buildOfferDraft>;
 }): Promise<{ id: string; number: string | null }> {
@@ -366,13 +413,15 @@ async function createQuote(params: {
     concept_text: params.conceptText,
     final_text: params.finalText,
     valid_until: params.validUntil,
-    margin_target: null,
+    margin_target: Number.isFinite(params.marginTarget) ? Number(params.marginTarget) : null,
     subtotal_net: built.totals.totalNet,
     vat_amount: Number((built.totals.totalGross - built.totals.totalNet).toFixed(2)),
     total_gross: built.totals.totalGross,
     pdf_storage_path: null,
     pdf_public_url: null,
-    ai_input_summary: null,
+    tariff_snapshot: params.tariffSnapshot ?? null,
+    patrol_snapshot: params.patrolSnapshot ?? null,
+    ai_input_summary: params.aiInputSummary ?? null,
   };
 
   let created = await supabase
@@ -394,6 +443,8 @@ async function createQuote(params: {
         total_gross: undefined,
         pdf_storage_path: undefined,
         pdf_public_url: undefined,
+        tariff_snapshot: undefined,
+        patrol_snapshot: undefined,
       })
       .select("id, number")
       .single();
@@ -571,6 +622,7 @@ async function attachGeneratedPdf(
 async function updateQuotePipelineData(
   supabase: SupabaseClient,
   input: QuickCreateContext,
+  marginTarget: number | undefined,
   pdf?: { storagePath?: string; publicUrl?: string }
 ): Promise<void> {
   const payload = {
@@ -578,7 +630,7 @@ async function updateQuotePipelineData(
     subtotal_net: input.built.totals.totalNet,
     vat_amount: Number((input.built.totals.totalGross - input.built.totals.totalNet).toFixed(2)),
     total_gross: input.built.totals.totalGross,
-    margin_target: input.mode === "quick" ? 0.2 : null,
+    margin_target: Number.isFinite(marginTarget) ? marginTarget : input.mode === "quick" ? 0.2 : null,
     pdf_storage_path: pdf?.storagePath ?? null,
     pdf_public_url: pdf?.publicUrl ?? null,
     updated_at: new Date().toISOString(),
@@ -617,21 +669,69 @@ export async function POST(request: Request) {
     const tenantId = await resolveTenantId(supabase);
     const customer = await findOrCreateCustomer(supabase, tenantId, body.customer);
     const project = await createProject(supabase, tenantId, customer.id, body.project);
-    const settings = await loadCompanySettings(supabase, tenantId);
+    const [settings, tariffDataset] = await Promise.all([
+      loadCompanySettings(supabase, tenantId),
+      loadTariffDataset(supabase),
+    ]);
     const mode: OfferMode =
       body.offer.mode === "standard" || body.offer.mode === "manual" ? body.offer.mode : "quick";
-    const built = buildOfferDraft({
-      mode,
-      serviceType: body.offer.serviceType,
-      quickTemplateId: body.offer.quickTemplateId,
-      settings,
-      durationMonths: parseRuntimeMonths(project.runtimeLabel),
-      discountAmount: 0,
-    });
+    const runtimeMonths = parseRuntimeMonths(project.runtimeLabel);
+    const targetMargin = parseTargetMargin(body.offer.targetMargin);
+    const timeModel = parseTimeModel(body.offer.timeModel);
+    const shouldUseIntegratedEngine =
+      mode === "quick"
+      && (
+        normalizeText(project.state).length > 0
+        || body.offer.targetMargin !== undefined
+        || body.offer.timeModel !== undefined
+        || body.offer.plannerOutput !== undefined
+      );
+
+    const integratedDraft = shouldUseIntegratedEngine
+      ? buildIntegratedOfferDraft({
+          serviceType: body.offer.serviceType,
+          state: normalizeText(project.state) || "Nordrhein-Westfalen",
+          runtimeMonths,
+          targetMargin,
+          timeModel,
+          serviceAddress: project.serviceAddress ?? project.location,
+          customerName: customer.companyName,
+          projectName: project.name,
+          notes: project.notes,
+          settings,
+          plannerOutput: body.offer.plannerOutput,
+          discountAmount: 0,
+          tariffDataset,
+          tariffContext: body.offer.tariffContext,
+          serviceContext: body.offer.serviceContext,
+          wageGroup: body.offer.wageGroup,
+          dutyDurationHours: Number.isFinite(body.offer.dutyDurationHours) ? Number(body.offer.dutyDurationHours) : undefined,
+          shiftStartIso: body.offer.shiftStartIso,
+          shiftEndIso: body.offer.shiftEndIso,
+          employerCostFactor: Number.isFinite(body.offer.employerCostFactor) ? Number(body.offer.employerCostFactor) : undefined,
+          patrolInput: body.offer.patrolInput,
+        })
+      : null;
+
+    const built = integratedDraft
+      ? {
+          mode,
+          serviceType: body.offer.serviceType,
+          lineItems: integratedDraft.lineItems,
+          totals: integratedDraft.totals,
+        }
+      : buildOfferDraft({
+          mode,
+          serviceType: body.offer.serviceType,
+          quickTemplateId: body.offer.quickTemplateId,
+          settings,
+          durationMonths: runtimeMonths,
+          discountAmount: 0,
+        });
 
     const durationLabel = project.runtimeLabel || "Bis auf Widerruf";
     const serviceTypeLabel = body.offer.serviceType;
-    let generatedText = buildFallbackText({
+    let generatedText = integratedDraft?.text.combined ?? buildFallbackText({
       customerName: customer.companyName,
       projectName: project.name,
       location: project.location,
@@ -665,6 +765,14 @@ export async function POST(request: Request) {
       generatedText,
       closingText: conceptText,
     });
+    const aiInputSummary = integratedDraft
+      ? JSON.stringify({
+          engine: "integrated",
+          decisions: integratedDraft.decisions,
+          tariff: integratedDraft.tariff,
+          techSetup: integratedDraft.techSetup,
+        })
+      : null;
     const validityDays = Number(settings?.defaultValidityDays ?? 14);
     const validUntil = new Date(
       Date.now() + Math.max(1, Number.isFinite(validityDays) ? validityDays : 14) * 24 * 60 * 60 * 1000
@@ -679,6 +787,10 @@ export async function POST(request: Request) {
       generatedText,
       conceptText,
       finalText,
+      aiInputSummary: aiInputSummary ?? undefined,
+      marginTarget: shouldUseIntegratedEngine ? targetMargin : undefined,
+      tariffSnapshot: integratedDraft?.tariffSnapshot as Record<string, unknown> | undefined,
+      patrolSnapshot: integratedDraft?.patrol as unknown as Record<string, unknown> | undefined,
       validUntil,
       built,
     });
@@ -713,7 +825,7 @@ export async function POST(request: Request) {
       project,
       built,
       settings,
-    }, pdf);
+    }, shouldUseIntegratedEngine ? targetMargin : undefined, pdf);
 
     return Response.json({
       quoteId: quote.id,
@@ -723,6 +835,16 @@ export async function POST(request: Request) {
       totals: built.totals,
       generatedText,
       finalText,
+      engine: integratedDraft
+        ? {
+            tariff: integratedDraft.tariff,
+            techSetup: integratedDraft.techSetup,
+            decisions: integratedDraft.decisions,
+            text: integratedDraft.text,
+            patrol: integratedDraft.patrol,
+            tariffSnapshot: integratedDraft.tariffSnapshot,
+          }
+        : null,
       pdfPublicUrl: pdf.publicUrl,
       pdfStoragePath: pdf.storagePath,
     });

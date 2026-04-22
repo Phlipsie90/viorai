@@ -39,6 +39,8 @@ export interface Quote {
   totalGross?: number;
   pdfStoragePath?: string;
   pdfPublicUrl?: string;
+  tariffSnapshot?: Record<string, unknown>;
+  patrolSnapshot?: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
 }
