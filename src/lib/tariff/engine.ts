@@ -136,6 +136,12 @@ export interface SalesPriceResult {
   targetMargin: number;
 }
 
+export interface ResolvedSurchargePercents {
+  night: number;
+  sunday: number;
+  holiday: number;
+}
+
 function roundMoney(value: number): number {
   return Math.round(value * 100) / 100;
 }
@@ -530,6 +536,55 @@ export function resolveNightSurchargePercent(input: {
 
   const maxPercent = Math.max(...normalizedPercents, 0);
   return Number.isFinite(maxPercent) ? maxPercent : 0;
+}
+
+function resolveSurchargePercent(input: {
+  dataset: TariffDataset;
+  tariffSetId: string;
+  state: string;
+  serviceType: string;
+  baseRate: number;
+  surchargeType: "night" | "sunday" | "holiday";
+}): number {
+  const normalizedState = normalizeState(input.state);
+  const normalizedServiceType = normalizeKey(input.serviceType);
+
+  const candidates = input.dataset.surcharges
+    .filter((entry) => entry.tariff_set_id === input.tariffSetId)
+    .filter((entry) => entry.surcharge_type === input.surchargeType)
+    .filter((entry) => entry.state === normalizedState || entry.state === "all")
+    .filter((entry) => !entry.applies_to_service_type || normalizeKey(entry.applies_to_service_type) === normalizedServiceType);
+
+  if (candidates.length === 0) {
+    return 0;
+  }
+
+  const normalizedPercents = candidates.map((entry) => {
+    if (entry.mode === "percent") {
+      return entry.value / 100;
+    }
+    if (input.baseRate <= 0) {
+      return 0;
+    }
+    return entry.value / input.baseRate;
+  });
+
+  const maxPercent = Math.max(...normalizedPercents, 0);
+  return Number.isFinite(maxPercent) ? maxPercent : 0;
+}
+
+export function resolveSurchargePercents(input: {
+  dataset: TariffDataset;
+  tariffSetId: string;
+  state: string;
+  serviceType: string;
+  baseRate: number;
+}): ResolvedSurchargePercents {
+  return {
+    night: resolveSurchargePercent({ ...input, surchargeType: "night" }),
+    sunday: resolveSurchargePercent({ ...input, surchargeType: "sunday" }),
+    holiday: resolveSurchargePercent({ ...input, surchargeType: "holiday" }),
+  };
 }
 
 export async function loadTariffDataset(supabase: SupabaseClient): Promise<TariffDataset> {

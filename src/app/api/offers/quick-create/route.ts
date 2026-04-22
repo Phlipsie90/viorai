@@ -1,7 +1,7 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { generateOfferTextWithDeepSeek } from "@/features/ai/deepseek";
 import { buildOfferDraft, type OfferMode } from "@/features/offers/build-offer-draft";
-import { buildIntegratedOfferDraft, type TariffTimeModel } from "@/features/offers/integrated-engine";
+import { buildIntegratedOfferDraft, type RuntimeMode, type TariffTimeModel } from "@/features/offers/integrated-engine";
 import { isQuoteServiceType, type QuoteQuickTemplateId, type QuoteServiceType } from "@/features/quotes/service-types";
 import type { CompanySettings } from "@/features/company-settings/types";
 import { buildQuotePdfFileName, generateQuotePdf } from "@/lib/pdf/generator";
@@ -39,6 +39,10 @@ interface QuickCreateRequestBody {
     quickTemplateId?: QuoteQuickTemplateId;
     autoGenerateText?: boolean;
     targetMargin?: number;
+    runtimeMode?: RuntimeMode;
+    runtimeMonths?: number;
+    runtimeLabel?: string;
+    employeeCount?: number;
     timeModel?: TariffTimeModel;
     tariffContext?: TariffContext;
     serviceContext?: string;
@@ -48,6 +52,7 @@ interface QuickCreateRequestBody {
     shiftEndIso?: string;
     employerCostFactor?: number;
     patrolInput?: PatrolInput;
+    includePlannerOutput?: boolean;
     plannerOutput?: {
       cameras?: number;
       towers?: number;
@@ -175,6 +180,10 @@ function parseTimeModel(timeModel: unknown): TariffTimeModel {
   }
 
   return "day";
+}
+
+function parseRuntimeMode(value: unknown): RuntimeMode {
+  return value === "fixed" ? "fixed" : "until_revocation";
 }
 
 function buildFallbackText(input: {
@@ -828,15 +837,23 @@ export async function POST(request: Request) {
     ]);
     const mode: OfferMode =
       body.offer.mode === "standard" || body.offer.mode === "manual" ? body.offer.mode : "quick";
-    const runtimeMonths = parseRuntimeMonths(project.runtimeLabel);
+    const projectRuntimeMonths = parseRuntimeMonths(project.runtimeLabel);
     const targetMargin = parseTargetMargin(body.offer.targetMargin);
     const timeModel = parseTimeModel(body.offer.timeModel);
+    const runtimeMode = parseRuntimeMode(body.offer.runtimeMode);
+    const runtimeMonths = runtimeMode === "fixed"
+      ? (Number.isFinite(body.offer.runtimeMonths) ? Math.max(1, Math.round(Number(body.offer.runtimeMonths))) : projectRuntimeMonths)
+      : 1;
+    const runtimeLabel = normalizeText(body.offer.runtimeLabel)
+      || (runtimeMode === "fixed" ? `${runtimeMonths} Monate` : "Bis auf Widerruf");
     const shouldUseIntegratedEngine =
       mode === "quick"
       && (
         normalizeText(project.state).length > 0
         || body.offer.targetMargin !== undefined
         || body.offer.timeModel !== undefined
+        || body.offer.employeeCount !== undefined
+        || body.offer.runtimeMode !== undefined
         || body.offer.plannerOutput !== undefined
       );
 
@@ -844,7 +861,10 @@ export async function POST(request: Request) {
       ? buildIntegratedOfferDraft({
           serviceType: body.offer.serviceType,
           state: normalizeText(project.state) || "Nordrhein-Westfalen",
+          runtimeMode,
           runtimeMonths,
+          runtimeLabel,
+          employeeCount: Number.isFinite(body.offer.employeeCount) ? Number(body.offer.employeeCount) : 1,
           targetMargin,
           timeModel,
           serviceAddress: project.serviceAddress ?? project.location,
@@ -852,7 +872,8 @@ export async function POST(request: Request) {
           projectName: project.name,
           notes: project.notes,
           settings,
-          plannerOutput: body.offer.plannerOutput,
+          includePlannerOutput: body.offer.includePlannerOutput === true,
+          plannerOutput: body.offer.includePlannerOutput === true ? body.offer.plannerOutput : undefined,
           discountAmount: 0,
           tariffDataset,
           tariffContext: body.offer.tariffContext,
@@ -948,7 +969,7 @@ export async function POST(request: Request) {
       dutyDurationHours: body.offer.dutyDurationHours,
       employerFactor: body.offer.employerCostFactor,
       timeModel,
-      plannerOutput: body.offer.plannerOutput,
+      plannerOutput: body.offer.includePlannerOutput === true ? body.offer.plannerOutput : undefined,
       calculationSnapshot: integratedDraft
         ? {
             totals: integratedDraft.totals,

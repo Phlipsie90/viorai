@@ -7,7 +7,8 @@ import {
   calculateSalesPrice,
   resolveTariff,
   resolveTariffContext,
-  resolveNightSurchargePercent,
+  resolveSurchargePercents,
+  type ResolvedSurchargePercents,
   type ResolvedTariff,
   type TariffContext,
   type TariffDataset,
@@ -15,6 +16,7 @@ import {
 import { calculatePatrolService, type PatrolCalculationResult, type PatrolInput } from "@/lib/patrol/engine";
 
 export type TariffTimeModel = "day" | "night" | "twentyfourseven" | "patrol";
+export type RuntimeMode = "until_revocation" | "fixed";
 
 export interface PlannerOutputInput {
   cameras?: number;
@@ -27,14 +29,18 @@ export interface PlannerOutputInput {
 export interface IntegratedOfferInput {
   serviceType: QuoteServiceType;
   state: string;
-  runtimeMonths: number;
+  runtimeMonths?: number;
+  runtimeMode?: RuntimeMode;
+  runtimeLabel?: string;
   targetMargin: number;
   timeModel: TariffTimeModel;
+  employeeCount?: number;
   serviceAddress: string;
   customerName: string;
   projectName: string;
   notes?: string;
   settings: CompanySettings | null;
+  includePlannerOutput?: boolean;
   plannerOutput?: PlannerOutputInput;
   discountAmount?: number;
   tariffDataset: TariffDataset;
@@ -67,19 +73,29 @@ export interface OfferTextSections {
 export interface TariffCalculationResult {
   context: TariffContext;
   resolved: ResolvedTariff;
-  monthlyHours: number;
-  dayHours: number;
-  nightHours: number;
-  nightSurchargePercent: number;
-  laborCostPerHour: number;
-  employerCostPerHour: number;
-  saleHourlyRate: number;
+  runtimeMode: RuntimeMode;
+  runtimeLabel: string;
+  employeeCount: number;
+  monthlyHoursPerEmployee: number;
+  dayHoursPerEmployee: number;
+  nightHoursPerEmployee: number;
+  surchargePercents: ResolvedSurchargePercents;
+  laborCostPerHourPerEmployee: number;
+  employerCostPerHourPerEmployee: number;
+  saleHourlyRatePerEmployee: number;
+  monthlyLaborCostPerEmployee: number;
+  monthlySalesValuePerEmployee: number;
+  employerCostPerHourTotal: number;
+  saleHourlyRateTotal: number;
+  monthlyLaborCostTotal: number;
+  monthlySalesValueTotal: number;
   employerCostFactor: number;
   targetMargin: number;
-  monthlyLaborCost: number;
-  monthlySalesValue: number;
   breakdown: {
     base_rate: number;
+    night_surcharge_percent: number;
+    sunday_surcharge_percent: number;
+    holiday_surcharge_percent: number;
     employer_factor: number;
     ag_cost_per_hour: number;
     margin: number;
@@ -103,6 +119,9 @@ export interface TariffSnapshot {
   matchedServiceContext: string;
   matchedWageGroup: string;
   dutyDurationHours?: number;
+  employeeCount: number;
+  runtimeMode: RuntimeMode;
+  runtimeLabel: string;
   appliedBaseRate: number;
   appliedSurcharges: Array<{
     surchargeType: string;
@@ -124,8 +143,13 @@ export interface TariffSnapshot {
   dayHours: number;
   nightHours: number;
   nightSurchargePercent: number;
+  sundaySurchargePercent: number;
+  holidaySurchargePercent: number;
   breakdown: {
     base_rate: number;
+    night_surcharge_percent: number;
+    sunday_surcharge_percent: number;
+    holiday_surcharge_percent: number;
     employer_factor: number;
     ag_cost_per_hour: number;
     margin: number;
@@ -166,6 +190,13 @@ function clampInt(value: number | undefined): number {
 
 function roundMoney(value: number): number {
   return Math.round(value * 100) / 100;
+}
+
+function clampEmployeeCount(value: number | undefined): number {
+  if (!Number.isFinite(value)) {
+    return 1;
+  }
+  return Math.max(1, Math.round(Number(value)));
 }
 
 function getDefaultServiceContext(serviceType: QuoteServiceType): string {
@@ -283,6 +314,8 @@ function buildTariffResult(input: IntegratedOfferInput, decisions: string[], pat
   });
   const serviceContext = input.serviceContext?.trim() || getDefaultServiceContext(input.serviceType);
   const wageGroup = requireWageGroup(input);
+  const runtimeMode: RuntimeMode = input.runtimeMode === "fixed" ? "fixed" : "until_revocation";
+  const runtimeLabel = input.runtimeLabel?.trim() || (runtimeMode === "fixed" ? `${input.runtimeMonths ?? 1} Monate` : "Bis auf Widerruf");
   const shiftHours = Number.isFinite(input.dutyDurationHours) ? Number(input.dutyDurationHours) : 0;
   if (shiftHours <= 0) {
     throw new Error("dutyDurationHours muss gesetzt sein (z. B. 12h).");
@@ -300,12 +333,13 @@ function buildTariffResult(input: IntegratedOfferInput, decisions: string[], pat
     shiftEndIso: input.shiftEndIso,
   });
 
-  const monthlyHours = patrol
+  const employeeCount = clampEmployeeCount(input.employeeCount);
+  const monthlyHoursPerEmployee = patrol
     ? Math.max(1, roundMoney(patrol.totalHours * Math.max(1, input.patrolInput?.weekdays ?? 30)))
     : Math.max(1, calculateMonthlyHours(shiftHours, input.timeModel));
 
   const baseRate = resolved.appliedBaseRate;
-  const nightSurchargePercent = resolveNightSurchargePercent({
+  const surchargePercents = resolveSurchargePercents({
     dataset: input.tariffDataset,
     tariffSetId: resolved.tariffSet.id,
     state: input.state,
@@ -313,13 +347,13 @@ function buildTariffResult(input: IntegratedOfferInput, decisions: string[], pat
     baseRate,
   });
 
-  const dayHours = patrol ? monthlyHours : roundMoney(monthlyHours * 0.7);
-  const nightHours = patrol ? 0 : roundMoney(monthlyHours - dayHours);
+  const dayHoursPerEmployee = patrol ? monthlyHoursPerEmployee : roundMoney(monthlyHoursPerEmployee * 0.7);
+  const nightHoursPerEmployee = patrol ? 0 : roundMoney(monthlyHoursPerEmployee - dayHoursPerEmployee);
 
   const monthlyBaseCost = roundMoney(
-    (dayHours * baseRate) + (nightHours * baseRate * (1 + nightSurchargePercent))
+    (dayHoursPerEmployee * baseRate) + (nightHoursPerEmployee * baseRate * (1 + surchargePercents.night))
   );
-  const weightedBaseRate = monthlyHours > 0 ? roundMoney(monthlyBaseCost / monthlyHours) : baseRate;
+  const weightedBaseRate = monthlyHoursPerEmployee > 0 ? roundMoney(monthlyBaseCost / monthlyHoursPerEmployee) : baseRate;
 
   const labor = calculateLaborCost({
     tariffBasisPerHour: weightedBaseRate,
@@ -332,35 +366,51 @@ function buildTariffResult(input: IntegratedOfferInput, decisions: string[], pat
   });
 
   decisions.push(`Tarifkontext '${context}' auf Basis ${resolved.tariffSet.title} (${resolved.tariffSet.sourceDate}) angewendet.`);
-  decisions.push(`Monatsstunden berechnet: ${monthlyHours}h (Schicht ${shiftHours}h, Modell ${input.timeModel}).`);
-  decisions.push(`Zuschlagslogik: ${dayHours}h Tag + ${nightHours}h Nacht mit Nachtzuschlag ${(nightSurchargePercent * 100).toFixed(2)}%.`);
+  decisions.push(`Monatsstunden pro MA: ${monthlyHoursPerEmployee}h (Schicht ${shiftHours}h, Modell ${input.timeModel}).`);
+  decisions.push(`Zuschlagslogik pro MA: ${dayHoursPerEmployee}h Tag + ${nightHoursPerEmployee}h Nacht mit Nachtzuschlag ${(surchargePercents.night * 100).toFixed(2)}%.`);
+  decisions.push(`Berechnung auf ${employeeCount} Mitarbeiter skaliert.`);
 
-  const monthlySalesValue = roundMoney(sales.salesPricePerHour * monthlyHours);
+  const monthlyLaborCostPerEmployee = roundMoney(labor.employerCostPerHour * monthlyHoursPerEmployee);
+  const monthlySalesValuePerEmployee = roundMoney(sales.salesPricePerHour * monthlyHoursPerEmployee);
+  const employerCostPerHourTotal = roundMoney(labor.employerCostPerHour * employeeCount);
+  const saleHourlyRateTotal = roundMoney(sales.salesPricePerHour * employeeCount);
+  const monthlyLaborCostTotal = roundMoney(monthlyLaborCostPerEmployee * employeeCount);
+  const monthlySalesValueTotal = roundMoney(monthlySalesValuePerEmployee * employeeCount);
 
   return {
     context,
     resolved,
-    monthlyHours,
-    dayHours,
-    nightHours,
-    nightSurchargePercent,
-    laborCostPerHour: labor.laborCostPerHour,
-    employerCostPerHour: labor.employerCostPerHour,
-    saleHourlyRate: sales.salesPricePerHour,
+    runtimeMode,
+    runtimeLabel,
+    employeeCount,
+    monthlyHoursPerEmployee,
+    dayHoursPerEmployee,
+    nightHoursPerEmployee,
+    surchargePercents,
+    laborCostPerHourPerEmployee: labor.laborCostPerHour,
+    employerCostPerHourPerEmployee: labor.employerCostPerHour,
+    saleHourlyRatePerEmployee: sales.salesPricePerHour,
+    monthlyLaborCostPerEmployee,
+    monthlySalesValuePerEmployee,
+    employerCostPerHourTotal,
+    saleHourlyRateTotal,
+    monthlyLaborCostTotal,
+    monthlySalesValueTotal,
     employerCostFactor: labor.employerCostFactor,
     targetMargin: sales.targetMargin,
-    monthlyLaborCost: roundMoney(labor.employerCostPerHour * monthlyHours),
-    monthlySalesValue,
     breakdown: {
       base_rate: baseRate,
+      night_surcharge_percent: surchargePercents.night,
+      sunday_surcharge_percent: surchargePercents.sunday,
+      holiday_surcharge_percent: surchargePercents.holiday,
       employer_factor: labor.employerCostFactor,
       ag_cost_per_hour: labor.employerCostPerHour,
       margin: sales.targetMargin,
       sales_rate_per_hour: sales.salesPricePerHour,
-      total_hours: monthlyHours,
-      day_hours: dayHours,
-      night_hours: nightHours,
-      monthly_price: monthlySalesValue,
+      total_hours: monthlyHoursPerEmployee,
+      day_hours: dayHoursPerEmployee,
+      night_hours: nightHoursPerEmployee,
+      monthly_price: monthlySalesValuePerEmployee,
     },
   };
 }
@@ -375,28 +425,29 @@ function buildLineItems(
   const items: QuoteLineItem[] = [];
 
   if (input.serviceType === "revierdienst") {
-    const patrolHours = patrol ? Math.max(1, roundMoney(patrol.totalHours * Math.max(1, input.patrolInput?.weekdays ?? 30))) : tariff.monthlyHours;
+    const patrolHours = patrol ? Math.max(1, roundMoney(patrol.totalHours * Math.max(1, input.patrolInput?.weekdays ?? 30))) : tariff.monthlyHoursPerEmployee;
+    const totalHours = roundMoney(patrolHours * tariff.employeeCount);
     items.push(
       createLineItem({
         type: "control_run",
         label: "Revierdienst (zeitbasiert kalkuliert)",
-        quantity: patrolHours,
+        quantity: totalHours,
         unit: "Std/Monat",
-        unitPrice: tariff.saleHourlyRate,
+        unitPrice: tariff.saleHourlyRatePerEmployee,
         billingMode: "recurring",
         interval: "monthly",
         category: "personell",
       })
     );
-    decisions.push(`Revierkalkulation zeitbasiert: ${patrolHours} Std./Monat.`);
+    decisions.push(`Revierkalkulation zeitbasiert: ${patrolHours} Std./Monat je MA (${tariff.employeeCount} MA).`);
   } else {
     items.push(
       createLineItem({
         type: "guard_hour",
-        label: `Tarifleistung ${input.state} (${input.timeModel})`,
-        quantity: tariff.monthlyHours,
+        label: `Tarifleistung ${input.state} (${input.timeModel}, ${tariff.employeeCount} MA)`,
+        quantity: roundMoney(tariff.monthlyHoursPerEmployee * tariff.employeeCount),
         unit: "Std/Monat",
-        unitPrice: tariff.saleHourlyRate,
+        unitPrice: tariff.saleHourlyRatePerEmployee,
         billingMode: "recurring",
         interval: "monthly",
         category: "personell",
@@ -504,9 +555,12 @@ function buildText(
     ? ` Revierlogik: ${patrol.controlsCount} Kontrollen, Fahrzeit ${patrol.driveToMinutes} min, Kontrollzeit gesamt ${patrol.controlMinutesTotal} min, Gesamtzeit ${patrol.totalHours} Std./Tour.`
     : "";
 
-  const details = `Technik-Setup: ${tech.cameras} Kameras, ${tech.towers} Türme, ${tech.recorders} Recorder, ${tech.switches} Switches. Laufzeit: ${input.runtimeMonths} Monat(e).${patrolInfo}`;
+  const runtimeLabel = input.runtimeLabel?.trim() || (input.runtimeMode === "fixed" ? `${input.runtimeMonths ?? 1} Monate` : "Bis auf Widerruf");
+  const details = `Personal: ${tariff.employeeCount} MA. Technik-Setup: ${tech.cameras} Kameras, ${tech.towers} Türme, ${tech.recorders} Recorder, ${tech.switches} Switches. Laufzeit: ${runtimeLabel}.${patrolInfo}`;
 
   const pricingBlock = `Monatlich: ${formatCurrency(draftTotals.monthlyTotal)} | Einmalig: ${formatCurrency(draftTotals.oneTimeTotal)} | Netto gesamt: ${formatCurrency(draftTotals.totalNet)} | Brutto: ${formatCurrency(draftTotals.totalGross)}.`;
+
+  const surchargeText = `Grundlage ist der tarifliche Lohn des gewählten Tarifkontexts. Nacht-, Sonn- und Feiertagszuschläge werden gemäß Tarif auf den tariflichen Lohn berücksichtigt; Zuschläge werden gesondert berücksichtigt und nicht als pauschale Gewinnkomponente behandelt.`;
 
   const closing = input.notes?.trim()
     ? `Hinweise: ${input.notes.trim()}\n\n${input.settings?.closingText ?? "Mit freundlichen Gruessen"}`
@@ -516,6 +570,8 @@ function buildText(
     introduction,
     "",
     serviceDescription,
+    "",
+    surchargeText,
     "",
     details,
     "",
@@ -547,16 +603,21 @@ function buildTariffSnapshot(tariff: TariffCalculationResult): TariffSnapshot {
     matchedServiceContext: tariff.resolved.matchedServiceContext,
     matchedWageGroup: tariff.resolved.matchedWageGroup,
     dutyDurationHours: tariff.resolved.dutyDurationHours,
+    employeeCount: tariff.employeeCount,
+    runtimeMode: tariff.runtimeMode,
+    runtimeLabel: tariff.runtimeLabel,
     appliedBaseRate: tariff.resolved.appliedBaseRate,
     appliedSurcharges: tariff.resolved.appliedSurcharges,
     appliedSpecialRules: tariff.resolved.appliedSpecialRules,
     employerCostFactor: tariff.employerCostFactor,
     targetMargin: tariff.targetMargin,
     calculationBasisPerHour: tariff.resolved.calculationBasisPerHour,
-    saleHourlyRate: tariff.saleHourlyRate,
-    dayHours: tariff.dayHours,
-    nightHours: tariff.nightHours,
-    nightSurchargePercent: tariff.nightSurchargePercent,
+    saleHourlyRate: tariff.saleHourlyRatePerEmployee,
+    dayHours: tariff.dayHoursPerEmployee,
+    nightHours: tariff.nightHoursPerEmployee,
+    nightSurchargePercent: tariff.surchargePercents.night,
+    sundaySurchargePercent: tariff.surchargePercents.sunday,
+    holidaySurchargePercent: tariff.surchargePercents.holiday,
     breakdown: tariff.breakdown,
   };
 }
@@ -571,10 +632,16 @@ function formatCurrency(value: number): string {
 }
 
 export function buildIntegratedOfferDraft(input: IntegratedOfferInput): IntegratedOfferDraft {
-  const runtimeMonths = Number.isFinite(input.runtimeMonths) ? Math.max(1, Math.round(input.runtimeMonths)) : 1;
+  const runtimeMode: RuntimeMode = input.runtimeMode === "fixed" ? "fixed" : "until_revocation";
+  const runtimeMonths = runtimeMode === "fixed"
+    ? (Number.isFinite(input.runtimeMonths) ? Math.max(1, Math.round(Number(input.runtimeMonths))) : 1)
+    : 1;
   const decisions: string[] = [];
 
-  const techSetup = deriveTechSetup(input.plannerOutput, decisions);
+  const includePlanner = input.includePlannerOutput === true;
+  const techSetup = includePlanner ? deriveTechSetup(input.plannerOutput, decisions) : deriveTechSetup(undefined, decisions);
+  decisions.push(`Planer aktiv: ${includePlanner ? "ja" : "nein"}.`);
+  decisions.push(`Laufzeitmodus: ${runtimeMode === "fixed" ? `Feste Laufzeit (${runtimeMonths} Monate)` : "Bis auf Widerruf"}.`);
   const patrol = input.serviceType === "revierdienst" && input.patrolInput
     ? calculatePatrolService(input.patrolInput)
     : undefined;

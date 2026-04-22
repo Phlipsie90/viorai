@@ -1,5 +1,5 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import { buildIntegratedOfferDraft, type TariffTimeModel } from "@/features/offers/integrated-engine";
+import { buildIntegratedOfferDraft, type RuntimeMode, type TariffTimeModel } from "@/features/offers/integrated-engine";
 import type { CompanySettings } from "@/features/company-settings/types";
 import { isQuoteServiceType, type QuoteServiceType } from "@/features/quotes/service-types";
 import { loadTariffDataset, type TariffContext } from "@/lib/tariff/engine";
@@ -14,7 +14,10 @@ interface QuickPreviewRequestBody {
   serviceAddress: string;
   state: string;
   serviceType: QuoteServiceType;
-  runtimeMonths: number;
+  runtimeMonths?: number;
+  runtimeMode?: RuntimeMode;
+  runtimeLabel?: string;
+  employeeCount?: number;
   targetMargin: number;
   timeModel: TariffTimeModel;
   notes?: string;
@@ -25,6 +28,7 @@ interface QuickPreviewRequestBody {
   shiftStartIso?: string;
   shiftEndIso?: string;
   employerCostFactor?: number;
+  includePlannerOutput?: boolean;
   plannerOutput?: {
     cameras?: number;
     towers?: number;
@@ -133,7 +137,10 @@ export async function POST(request: Request) {
     const draft = buildIntegratedOfferDraft({
       serviceType: body.serviceType,
       state: normalizeText(body.state) || "Nordrhein-Westfalen",
-      runtimeMonths: Number.isFinite(body.runtimeMonths) ? Math.max(1, Math.round(body.runtimeMonths)) : 1,
+      runtimeMode: body.runtimeMode === "fixed" ? "fixed" : "until_revocation",
+      runtimeMonths: Number.isFinite(body.runtimeMonths) ? Math.max(1, Math.round(Number(body.runtimeMonths))) : undefined,
+      runtimeLabel: normalizeText(body.runtimeLabel) || undefined,
+      employeeCount: Number.isFinite(body.employeeCount) ? Math.max(1, Math.round(Number(body.employeeCount))) : 1,
       targetMargin: Number.isFinite(body.targetMargin) ? body.targetMargin : 0.22,
       timeModel: body.timeModel,
       serviceAddress: normalizeText(body.serviceAddress) || "Einsatzort",
@@ -141,7 +148,8 @@ export async function POST(request: Request) {
       projectName: normalizeText(body.projectName) || "Sicherheitsprojekt",
       notes: body.notes,
       settings,
-      plannerOutput: body.plannerOutput,
+      includePlannerOutput: body.includePlannerOutput === true,
+      plannerOutput: body.includePlannerOutput === true ? body.plannerOutput : undefined,
       discountAmount: 0,
       tariffDataset,
       tariffContext: body.tariffContext,

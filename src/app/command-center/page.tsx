@@ -6,7 +6,7 @@ import { useRouter } from "next/navigation";
 import { getSupabaseClient, getSupabaseSessionSafe } from "@/lib/supabase/client";
 import { QUOTE_SERVICE_TYPE_OPTIONS, type QuoteServiceType } from "@/features/quotes/service-types";
 import type { TariffContext } from "@/lib/tariff/engine";
-import type { TariffTimeModel } from "@/features/offers/integrated-engine";
+import type { RuntimeMode, TariffTimeModel } from "@/features/offers/integrated-engine";
 
 type PatrolInput = {
   controlsCount: number;
@@ -39,7 +39,9 @@ interface CommandCenterFormState {
   serviceAddress: string;
   serviceType: QuoteServiceType;
   state: string;
+  runtimeMode: RuntimeMode;
   runtimeMonths: number;
+  employeeCount: number;
   targetMarginPercent: number;
   timeModel: TariffTimeModel;
   tariffContext: TariffContext;
@@ -49,6 +51,7 @@ interface CommandCenterFormState {
   employerCostFactor: number;
   shiftStartIso: string;
   notes: string;
+  includePlannerOutput: boolean;
   plannerOutput: PlannerOutputInput;
   patrolInput: PatrolInput;
 }
@@ -64,15 +67,33 @@ interface EngineDraftResponse {
     };
     tariff: {
       context: TariffContext;
-      monthlyHours: number;
-      laborCostPerHour: number;
-      employerCostPerHour: number;
-      saleHourlyRate: number;
+      employeeCount: number;
+      runtimeMode: RuntimeMode;
+      runtimeLabel: string;
+      monthlyHoursPerEmployee: number;
+      dayHoursPerEmployee: number;
+      nightHoursPerEmployee: number;
+      surchargePercents: {
+        night: number;
+        sunday: number;
+        holiday: number;
+      };
+      laborCostPerHourPerEmployee: number;
+      employerCostPerHourPerEmployee: number;
+      saleHourlyRatePerEmployee: number;
+      monthlyLaborCostPerEmployee: number;
+      monthlySalesValuePerEmployee: number;
+      employerCostPerHourTotal: number;
+      saleHourlyRateTotal: number;
+      monthlyLaborCostTotal: number;
+      monthlySalesValueTotal: number;
       employerCostFactor: number;
       targetMargin: number;
-      monthlyLaborCost: number;
-      monthlySalesValue: number;
       resolved: {
+        state: string;
+        serviceType: string;
+        serviceContext: string;
+        wageGroup: string;
         tariffSet: {
           key: string;
           title: string;
@@ -92,6 +113,10 @@ interface EngineDraftResponse {
           percentAdd: number;
           note?: string;
         }>;
+      };
+      breakdown: {
+        base_rate: number;
+        monthly_price: number;
       };
     };
     patrol?: {
@@ -148,6 +173,8 @@ const INITIAL_FORM: CommandCenterFormState = {
   serviceType: "objektschutz",
   state: "nordrhein-westfalen",
   runtimeMonths: 3,
+  runtimeMode: "until_revocation",
+  employeeCount: 1,
   targetMarginPercent: 22,
   timeModel: "day",
   tariffContext: "standard",
@@ -157,6 +184,7 @@ const INITIAL_FORM: CommandCenterFormState = {
   employerCostFactor: 1.34,
   shiftStartIso: new Date().toISOString().slice(0, 16),
   notes: "",
+  includePlannerOutput: false,
   plannerOutput: {
     cameras: 6,
     towers: 2,
@@ -192,7 +220,8 @@ export default function CommandCenterPage() {
       && form.postalCode.trim().length > 0
       && form.city.trim().length > 0
       && form.serviceAddress.trim().length > 0
-      && form.runtimeMonths > 0
+      && (form.runtimeMode === "until_revocation" || form.runtimeMonths > 0)
+      && form.employeeCount > 0
       && form.targetMarginPercent > 0;
   }, [form]);
 
@@ -232,7 +261,10 @@ export default function CommandCenterPage() {
     serviceAddress: form.serviceAddress,
     state: form.state,
     serviceType: form.serviceType,
-    runtimeMonths: form.runtimeMonths,
+    runtimeMode: form.runtimeMode,
+    runtimeMonths: form.runtimeMode === "fixed" ? form.runtimeMonths : undefined,
+    runtimeLabel: form.runtimeMode === "fixed" ? `${form.runtimeMonths} Monate` : "Bis auf Widerruf",
+    employeeCount: form.employeeCount,
     targetMargin: form.targetMarginPercent / 100,
     timeModel: form.timeModel,
     notes: form.notes,
@@ -242,13 +274,14 @@ export default function CommandCenterPage() {
     dutyDurationHours: form.dutyDurationHours,
     shiftStartIso: new Date(form.shiftStartIso).toISOString(),
     employerCostFactor: form.employerCostFactor,
-    plannerOutput: form.plannerOutput,
+    includePlannerOutput: form.includePlannerOutput,
+    plannerOutput: form.includePlannerOutput ? form.plannerOutput : undefined,
     patrolInput: form.serviceType === "revierdienst" ? form.patrolInput : undefined,
   });
 
   const runPreview = async () => {
     if (!topFieldsValid) {
-      setError("Bitte Kunde (Name, Ansprechpartner, Straße, PLZ, Ort) sowie Einsatzort, Laufzeit und Zielmarge ausfüllen.");
+      setError("Bitte Kunde, Einsatzort, Mitarbeiteranzahl und Zielmarge ausfüllen. Bei fester Laufzeit zusätzlich Monate setzen.");
       return;
     }
 
@@ -280,7 +313,7 @@ export default function CommandCenterPage() {
 
   const createOffer = async () => {
     if (!topFieldsValid) {
-      setError("Bitte Kunde (Name, Ansprechpartner, Straße, PLZ, Ort) sowie Einsatzort, Laufzeit und Zielmarge ausfüllen.");
+      setError("Bitte Kunde, Einsatzort, Mitarbeiteranzahl und Zielmarge ausfüllen. Bei fester Laufzeit zusätzlich Monate setzen.");
       return;
     }
 
@@ -309,12 +342,16 @@ export default function CommandCenterPage() {
             name: form.projectName,
             serviceAddress: form.serviceAddress,
             state: form.state,
-            runtimeLabel: `${form.runtimeMonths} Monate`,
+            runtimeLabel: form.runtimeMode === "fixed" ? `${form.runtimeMonths} Monate` : "Bis auf Widerruf",
             notes: form.notes,
           },
           offer: {
             mode: "quick",
             serviceType: form.serviceType,
+            runtimeMode: form.runtimeMode,
+            runtimeMonths: form.runtimeMode === "fixed" ? form.runtimeMonths : undefined,
+            runtimeLabel: form.runtimeMode === "fixed" ? `${form.runtimeMonths} Monate` : "Bis auf Widerruf",
+            employeeCount: form.employeeCount,
             targetMargin: form.targetMarginPercent / 100,
             timeModel: form.timeModel,
             tariffContext: form.tariffContext,
@@ -324,7 +361,8 @@ export default function CommandCenterPage() {
             shiftStartIso: new Date(form.shiftStartIso).toISOString(),
             employerCostFactor: form.employerCostFactor,
             patrolInput: form.serviceType === "revierdienst" ? form.patrolInput : undefined,
-            plannerOutput: form.plannerOutput,
+            includePlannerOutput: form.includePlannerOutput,
+            plannerOutput: form.includePlannerOutput ? form.plannerOutput : undefined,
             autoGenerateText: true,
           },
         }),
@@ -381,8 +419,19 @@ export default function CommandCenterPage() {
           <Field label="Bundesland" className="min-w-[180px]">
             <input className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" value={form.state} onChange={(event) => setForm((prev) => ({ ...prev, state: event.target.value }))} />
           </Field>
-          <Field label="Laufzeit (Monate)" className="min-w-[140px]">
-            <input type="number" min={1} className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" value={form.runtimeMonths} onChange={(event) => setForm((prev) => ({ ...prev, runtimeMonths: Math.max(1, Number(event.target.value) || 1) }))} />
+          <Field label="Laufzeitmodus" className="min-w-[180px]">
+            <select className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white" value={form.runtimeMode} onChange={(event) => setForm((prev) => ({ ...prev, runtimeMode: event.target.value as RuntimeMode }))}>
+              <option value="until_revocation">Bis auf Widerruf</option>
+              <option value="fixed">Feste Laufzeit</option>
+            </select>
+          </Field>
+          {form.runtimeMode === "fixed" && (
+            <Field label="Laufzeit (Monate)" className="min-w-[140px]">
+              <input type="number" min={1} className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" value={form.runtimeMonths} onChange={(event) => setForm((prev) => ({ ...prev, runtimeMonths: Math.max(1, Number(event.target.value) || 1) }))} />
+            </Field>
+          )}
+          <Field label="Anzahl Mitarbeiter" className="min-w-[160px]">
+            <input type="number" min={1} className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" value={form.employeeCount} onChange={(event) => setForm((prev) => ({ ...prev, employeeCount: Math.max(1, Number(event.target.value) || 1) }))} />
           </Field>
           <Field label="Zielmarge (%)" className="min-w-[140px]">
             <input type="number" min={5} max={60} className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" value={form.targetMarginPercent} onChange={(event) => setForm((prev) => ({ ...prev, targetMarginPercent: Math.max(5, Math.min(60, Number(event.target.value) || 5)) }))} />
@@ -404,9 +453,9 @@ export default function CommandCenterPage() {
           <div className="grid grid-cols-2 gap-3">
             <Field label="Tarifkontext">
               <select className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white" value={form.tariffContext} onChange={(event) => setForm((prev) => ({ ...prev, tariffContext: event.target.value as TariffContext }))}>
-                <option value="standard">standard</option>
-                <option value="military">military</option>
-                <option value="kta">kta</option>
+                <option value="standard">Standard</option>
+                <option value="military">Militär</option>
+                <option value="kta">KTA</option>
               </select>
             </Field>
             <Field label="Service-Kontext">
@@ -433,13 +482,17 @@ export default function CommandCenterPage() {
               <option value="patrol">Reviermodell</option>
             </select>
           </Field>
+          <label className="flex items-center gap-2 text-sm text-slate-700">
+            <input type="checkbox" checked={form.includePlannerOutput} onChange={(event) => setForm((prev) => ({ ...prev, includePlannerOutput: event.target.checked }))} />
+            Planer-Output in Kalkulation einbeziehen
+          </label>
           <Field label="Planer-Output (optional)">
             <div className="grid grid-cols-2 gap-2">
-              <NumberInput label="Kameras" value={form.plannerOutput.cameras} onChange={(value) => updatePlanner("cameras", value)} />
-              <NumberInput label="Türme" value={form.plannerOutput.towers} onChange={(value) => updatePlanner("towers", value)} />
-              <NumberInput label="Recorder" value={form.plannerOutput.recorders} onChange={(value) => updatePlanner("recorders", value)} />
-              <NumberInput label="Switches" value={form.plannerOutput.switches} onChange={(value) => updatePlanner("switches", value)} />
-              <NumberInput label="Hindernisse" value={form.plannerOutput.obstacles} onChange={(value) => updatePlanner("obstacles", value)} />
+              <NumberInput disabled={!form.includePlannerOutput} label="Kameras" value={form.plannerOutput.cameras} onChange={(value) => updatePlanner("cameras", value)} />
+              <NumberInput disabled={!form.includePlannerOutput} label="Türme" value={form.plannerOutput.towers} onChange={(value) => updatePlanner("towers", value)} />
+              <NumberInput disabled={!form.includePlannerOutput} label="Recorder" value={form.plannerOutput.recorders} onChange={(value) => updatePlanner("recorders", value)} />
+              <NumberInput disabled={!form.includePlannerOutput} label="Switches" value={form.plannerOutput.switches} onChange={(value) => updatePlanner("switches", value)} />
+              <NumberInput disabled={!form.includePlannerOutput} label="Hindernisse" value={form.plannerOutput.obstacles} onChange={(value) => updatePlanner("obstacles", value)} />
             </div>
           </Field>
           {form.serviceType === "revierdienst" && (
@@ -467,25 +520,35 @@ export default function CommandCenterPage() {
           ) : (
             <>
               <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm space-y-1">
-                <p>Tarifkontext: <span className="font-semibold">{preview.tariff.context}</span></p>
+                <p className="font-semibold text-slate-700">Tarifbasis</p>
+                <p>Tarifkontext: <span className="font-semibold">{toGermanTariffContext(preview.tariff.context)}</span></p>
                 <p>Tarifset: <span className="font-semibold">{preview.tariff.resolved.tariffSet.title}</span></p>
-                <p>Version: <span className="font-semibold">{preview.tariff.resolved.tariffSet.sourceDate}</span></p>
-                <p>Basissatz: <span className="font-semibold">{formatCurrency(preview.tariff.resolved.appliedBaseRate)}/h</span></p>
-                <p>Arbeitgeberkosten: <span className="font-semibold">{formatCurrency(preview.tariff.employerCostPerHour)}/h</span></p>
-                <p>Verkaufssatz: <span className="font-semibold">{formatCurrency(preview.tariff.saleHourlyRate)}/h</span></p>
-                <p>Zielmarge: <span className="font-semibold">{(preview.tariff.targetMargin * 100).toFixed(1)}%</span></p>
+                <p>Bundesland: <span className="font-semibold">{preview.tariff.resolved.state}</span></p>
+                <p>Leistungsart: <span className="font-semibold">{preview.tariff.resolved.serviceType}</span></p>
+                <p>Lohngruppe: <span className="font-semibold">{preview.tariff.resolved.wageGroup}</span></p>
+                <p>Tariflicher Stundenlohn: <span className="font-semibold">{formatCurrency(preview.tariff.resolved.appliedBaseRate)}/h</span></p>
               </div>
               <div className="rounded-xl border border-slate-200 p-3 text-sm space-y-1">
                 <p className="font-semibold text-slate-700">Zuschläge</p>
-                {(preview.tariff.resolved.appliedSurcharges.length === 0 ? ["Keine Zuschläge."] : preview.tariff.resolved.appliedSurcharges.map((item) => `${item.surchargeType}: +${formatCurrency(item.amountPerHour)}/h`)).map((line) => (
-                  <p key={line} className="text-slate-600">- {line}</p>
-                ))}
+                <p>Nachtzuschlag: <span className="font-semibold">{(preview.tariff.surchargePercents.night * 100).toFixed(2)}%</span></p>
+                <p>Sonntagszuschlag: <span className="font-semibold">{(preview.tariff.surchargePercents.sunday * 100).toFixed(2)}%</span></p>
+                <p>Feiertagszuschlag: <span className="font-semibold">{(preview.tariff.surchargePercents.holiday * 100).toFixed(2)}%</span></p>
+                <p className="text-slate-500">Hinweis: Zuschläge werden auf den tariflichen Lohn angewendet und sind keine eigenständige Gewinnkomponente.</p>
               </div>
               <div className="rounded-xl border border-slate-200 p-3 text-sm space-y-1">
-                <p className="font-semibold text-slate-700">Sonderregeln</p>
-                {(preview.tariff.resolved.appliedSpecialRules.length === 0 ? ["Keine Sonderregeln."] : preview.tariff.resolved.appliedSpecialRules.map((item) => `${item.ruleType}: +${item.absoluteHourlyAdd.toFixed(2)} EUR/h, +${item.percentAdd.toFixed(2)}%`)).map((line) => (
-                  <p key={line} className="text-slate-600">- {line}</p>
-                ))}
+                <p className="font-semibold text-slate-700">Kosten 1 MA</p>
+                <p>Arbeitgeberkosten/h: <span className="font-semibold">{formatCurrency(preview.tariff.employerCostPerHourPerEmployee)}</span></p>
+                <p>Verkaufspreis/h: <span className="font-semibold">{formatCurrency(preview.tariff.saleHourlyRatePerEmployee)}</span></p>
+                <p>Arbeitgeberkosten/Monat: <span className="font-semibold">{formatCurrency(preview.tariff.monthlyLaborCostPerEmployee)}</span></p>
+                <p>Verkaufspreis/Monat: <span className="font-semibold">{formatCurrency(preview.tariff.monthlySalesValuePerEmployee)}</span></p>
+              </div>
+              <div className="rounded-xl border border-slate-200 p-3 text-sm space-y-1">
+                <p className="font-semibold text-slate-700">Kosten gesamt</p>
+                <p>Anzahl Mitarbeiter: <span className="font-semibold">{preview.tariff.employeeCount}</span></p>
+                <p>Arbeitgeberkosten/h gesamt: <span className="font-semibold">{formatCurrency(preview.tariff.employerCostPerHourTotal)}</span></p>
+                <p>Verkaufspreis/h gesamt: <span className="font-semibold">{formatCurrency(preview.tariff.saleHourlyRateTotal)}</span></p>
+                <p>Arbeitgeberkosten/Monat gesamt: <span className="font-semibold">{formatCurrency(preview.tariff.monthlyLaborCostTotal)}</span></p>
+                <p>Verkaufspreis/Monat gesamt: <span className="font-semibold">{formatCurrency(preview.tariff.monthlySalesValueTotal)}</span></p>
               </div>
               {preview.patrol && (
                 <div className="rounded-xl border border-slate-200 p-3 text-sm space-y-1">
@@ -498,6 +561,8 @@ export default function CommandCenterPage() {
               )}
               <div className="rounded-xl border border-slate-200 p-3 text-sm space-y-2">
                 <p className="font-semibold text-slate-700">Automatisierungs-Entscheidungen</p>
+                <p className="text-slate-600">- Planer aktiv: {form.includePlannerOutput ? "ja" : "nein"}</p>
+                <p className="text-slate-600">- Laufzeitmodus: {form.runtimeMode === "fixed" ? `Feste Laufzeit (${form.runtimeMonths} Monate)` : "Bis auf Widerruf"}</p>
                 {(preview.decisions.length === 0 ? ["Keine Zusatzentscheidungen erforderlich."] : preview.decisions).map((decision) => (
                   <p key={decision} className="text-slate-600">- {decision}</p>
                 ))}
@@ -583,10 +648,12 @@ function Field({
 function NumberInput({
   label,
   value,
+  disabled,
   onChange,
 }: {
   label: string;
   value: number;
+  disabled?: boolean;
   onChange: (value: number) => void;
 }) {
   return (
@@ -596,6 +663,7 @@ function NumberInput({
         type="number"
         min={0}
         value={value}
+        disabled={disabled}
         className="w-full rounded-lg border border-slate-300 px-2 py-1.5 text-sm"
         onChange={(event) => onChange(Number(event.target.value) || 0)}
       />
@@ -609,4 +677,14 @@ function formatCurrency(value: number): string {
     currency: "EUR",
     maximumFractionDigits: 2,
   }).format(value);
+}
+
+function toGermanTariffContext(context: TariffContext): string {
+  if (context === "standard") {
+    return "Standard";
+  }
+  if (context === "military") {
+    return "Militär";
+  }
+  return "KTA";
 }
