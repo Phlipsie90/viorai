@@ -72,6 +72,9 @@ interface QuickCreateContext {
     id: string;
     companyName: string;
     contactName?: string;
+    street?: string;
+    postalCode?: string;
+    city?: string;
     email?: string;
     phone?: string;
     address?: string;
@@ -108,6 +111,23 @@ function isLegacyQuotesColumnError(message?: string | null): boolean {
     || message.includes("column quotes.total_gross does not exist")
     || message.includes("column quotes.pdf_storage_path does not exist")
     || message.includes("column quotes.pdf_public_url does not exist")
+    || message.includes("column quotes.pdf_path does not exist")
+    || message.includes("column quotes.tariff_context does not exist")
+    || message.includes("column quotes.state does not exist")
+    || message.includes("column quotes.wage_group does not exist")
+    || message.includes("column quotes.duty_duration_hours does not exist")
+    || message.includes("column quotes.employer_factor does not exist")
+    || message.includes("column quotes.time_model does not exist")
+    || message.includes("column quotes.planner_camera_count does not exist")
+    || message.includes("column quotes.planner_tower_count does not exist")
+    || message.includes("column quotes.planner_recorder_count does not exist")
+    || message.includes("column quotes.planner_switch_count does not exist")
+    || message.includes("column quotes.planner_obstacle_count does not exist")
+    || message.includes("column quotes.calculation_snapshot does not exist")
+    || message.includes("column quotes.monthly_amount does not exist")
+    || message.includes("column quotes.one_time_amount does not exist")
+    || message.includes("column quotes.net_total does not exist")
+    || message.includes("column quotes.gross_total does not exist")
     || message.includes("column quotes.tariff_snapshot does not exist")
     || message.includes("column quotes.patrol_snapshot does not exist")
     || normalized.includes("within group is required for ordered-set aggregate mode");
@@ -118,6 +138,12 @@ function parseAddress(input: QuickCreateRequestBody["customer"]): string {
   const postalCode = normalizeText(input.postalCode);
   const city = normalizeText(input.city);
   return [street, postalCode, city].filter((part) => part.length > 0).join(", ");
+}
+
+function composeAddress(input: { street?: string | null; postalCode?: string | null; city?: string | null }): string {
+  return [normalizeText(input.street), normalizeText(input.postalCode), normalizeText(input.city)]
+    .filter((part) => part.length > 0)
+    .join(", ");
 }
 
 function parseRuntimeMonths(runtimeLabel?: string): number {
@@ -234,11 +260,22 @@ async function loadCompanySettings(supabase: SupabaseClient, tenantId: string): 
   };
 }
 
-async function findOrCreateCustomer(
+async function upsertCustomer(
   supabase: SupabaseClient,
   tenantId: string,
   body: QuickCreateRequestBody["customer"]
-): Promise<{ id: string; companyName: string; contactName?: string; email?: string; phone?: string; address?: string; billingAddress?: string }> {
+): Promise<{
+  id: string;
+  companyName: string;
+  contactName?: string;
+  street?: string;
+  postalCode?: string;
+  city?: string;
+  email?: string;
+  phone?: string;
+  address?: string;
+  billingAddress?: string;
+}> {
   const companyName = normalizeText(body.companyName);
   const email = normalizeText(body.email).toLowerCase();
   if (!companyName) {
@@ -247,7 +284,7 @@ async function findOrCreateCustomer(
 
   const companyMatches = await supabase
     .from("customers")
-    .select("id, company_name, contact_name, email, phone, address, billing_address")
+    .select("id, company_name, contact_name, street, postal_code, city, email, phone, address, billing_address")
     .eq("tenant_id", tenantId)
     .ilike("company_name", companyName)
     .limit(20);
@@ -261,17 +298,46 @@ async function findOrCreateCustomer(
     : matches.find((entry) => normalizeText(entry.company_name as string).toLowerCase() === companyName.toLowerCase()) ?? matches[0];
 
   if (selectedMatch?.id) {
+    const nextStreet = normalizeText(body.street);
+    const nextPostalCode = normalizeText(body.postalCode);
+    const nextCity = normalizeText(body.city);
+    const nextAddress = parseAddress(body);
+    const patch = {
+      contact_name: normalizeText(body.contactName) || normalizeText(selectedMatch.contact_name as string) || null,
+      street: nextStreet || normalizeText(selectedMatch.street as string) || null,
+      postal_code: nextPostalCode || normalizeText(selectedMatch.postal_code as string) || null,
+      city: nextCity || normalizeText(selectedMatch.city as string) || null,
+      email: email || normalizeText(selectedMatch.email as string) || null,
+      phone: normalizeText(body.phone) || normalizeText(selectedMatch.phone as string) || null,
+      address: nextAddress || normalizeText(selectedMatch.address as string) || null,
+      billing_address: nextAddress || normalizeText(selectedMatch.billing_address as string) || null,
+      updated_at: new Date().toISOString(),
+    };
+    await supabase
+      .from("customers")
+      .update(patch)
+      .eq("id", String(selectedMatch.id))
+      .eq("tenant_id", tenantId);
+
+    const normalizedAddress = patch.address ?? (composeAddress({ street: patch.street, postalCode: patch.postal_code, city: patch.city }) || undefined);
+
     return {
       id: String(selectedMatch.id),
       companyName: String(selectedMatch.company_name ?? companyName),
-      contactName: normalizeText(selectedMatch.contact_name as string) || undefined,
-      email: normalizeText(selectedMatch.email as string) || undefined,
-      phone: normalizeText(selectedMatch.phone as string) || undefined,
-      address: normalizeText(selectedMatch.address as string) || undefined,
-      billingAddress: normalizeText(selectedMatch.billing_address as string) || undefined,
+      contactName: patch.contact_name ?? undefined,
+      street: patch.street ?? undefined,
+      postalCode: patch.postal_code ?? undefined,
+      city: patch.city ?? undefined,
+      email: patch.email ?? undefined,
+      phone: patch.phone ?? undefined,
+      address: normalizedAddress,
+      billingAddress: patch.billing_address ?? normalizedAddress,
     };
   }
 
+  const street = normalizeText(body.street) || null;
+  const postalCode = normalizeText(body.postalCode) || null;
+  const city = normalizeText(body.city) || null;
   const address = parseAddress(body);
   const insertResult = await supabase
     .from("customers")
@@ -279,13 +345,16 @@ async function findOrCreateCustomer(
       tenant_id: tenantId,
       company_name: companyName,
       contact_name: normalizeText(body.contactName) || null,
+      street,
+      postal_code: postalCode,
+      city,
       email: email || null,
       phone: normalizeText(body.phone) || null,
       address: address || null,
       billing_address: address || null,
       notes: null,
     })
-    .select("id, company_name, contact_name, email, phone, address, billing_address")
+    .select("id, company_name, contact_name, street, postal_code, city, email, phone, address, billing_address")
     .single();
 
   if (insertResult.error || !insertResult.data?.id) {
@@ -296,6 +365,9 @@ async function findOrCreateCustomer(
     id: String(insertResult.data.id),
     companyName: String(insertResult.data.company_name ?? companyName),
     contactName: normalizeText(insertResult.data.contact_name as string) || undefined,
+    street: normalizeText(insertResult.data.street as string) || undefined,
+    postalCode: normalizeText(insertResult.data.postal_code as string) || undefined,
+    city: normalizeText(insertResult.data.city as string) || undefined,
     email: normalizeText(insertResult.data.email as string) || undefined,
     phone: normalizeText(insertResult.data.phone as string) || undefined,
     address: normalizeText(insertResult.data.address as string) || undefined,
@@ -367,7 +439,7 @@ async function createProject(
   };
 }
 
-async function createQuote(params: {
+async function createOffer(params: {
   supabase: SupabaseClient;
   tenantId: string;
   customerId: string;
@@ -379,6 +451,20 @@ async function createQuote(params: {
   finalText: string;
   aiInputSummary?: string;
   marginTarget?: number;
+  tariffContext?: TariffContext;
+  state?: string;
+  wageGroup?: string;
+  dutyDurationHours?: number;
+  employerFactor?: number;
+  timeModel?: TariffTimeModel;
+  plannerOutput?: {
+    cameras?: number;
+    towers?: number;
+    recorders?: number;
+    switches?: number;
+    obstacles?: number;
+  };
+  calculationSnapshot?: Record<string, unknown>;
   tariffSnapshot?: Record<string, unknown>;
   patrolSnapshot?: Record<string, unknown>;
   validUntil: string;
@@ -398,6 +484,22 @@ async function createQuote(params: {
     project_id: params.projectId,
     mode: params.mode,
     service_type: params.serviceType,
+    tariff_context: params.tariffContext ?? null,
+    state: normalizeText(params.state) || null,
+    wage_group: normalizeText(params.wageGroup) || null,
+    duty_duration_hours: Number.isFinite(params.dutyDurationHours) ? Number(params.dutyDurationHours) : null,
+    employer_factor: Number.isFinite(params.employerFactor) ? Number(params.employerFactor) : null,
+    time_model: params.timeModel ?? null,
+    planner_camera_count: Number.isFinite(params.plannerOutput?.cameras) ? Number(params.plannerOutput?.cameras) : 0,
+    planner_tower_count: Number.isFinite(params.plannerOutput?.towers) ? Number(params.plannerOutput?.towers) : 0,
+    planner_recorder_count: Number.isFinite(params.plannerOutput?.recorders) ? Number(params.plannerOutput?.recorders) : 0,
+    planner_switch_count: Number.isFinite(params.plannerOutput?.switches) ? Number(params.plannerOutput?.switches) : 0,
+    planner_obstacle_count: Number.isFinite(params.plannerOutput?.obstacles) ? Number(params.plannerOutput?.obstacles) : 0,
+    calculation_snapshot: params.calculationSnapshot ?? null,
+    monthly_amount: built.totals.monthlyTotal,
+    one_time_amount: built.totals.oneTimeTotal,
+    net_total: built.totals.totalNet,
+    gross_total: built.totals.totalGross,
     status: "draft",
     positions: built.lineItems,
     pricing: {
@@ -419,6 +521,7 @@ async function createQuote(params: {
     total_gross: built.totals.totalGross,
     pdf_storage_path: null,
     pdf_public_url: null,
+    pdf_path: null,
     tariff_snapshot: params.tariffSnapshot ?? null,
     patrol_snapshot: params.patrolSnapshot ?? null,
     ai_input_summary: params.aiInputSummary ?? null,
@@ -443,6 +546,23 @@ async function createQuote(params: {
         total_gross: undefined,
         pdf_storage_path: undefined,
         pdf_public_url: undefined,
+        tariff_context: undefined,
+        state: undefined,
+        wage_group: undefined,
+        duty_duration_hours: undefined,
+        employer_factor: undefined,
+        time_model: undefined,
+        planner_camera_count: undefined,
+        planner_tower_count: undefined,
+        planner_recorder_count: undefined,
+        planner_switch_count: undefined,
+        planner_obstacle_count: undefined,
+        calculation_snapshot: undefined,
+        monthly_amount: undefined,
+        one_time_amount: undefined,
+        net_total: undefined,
+        gross_total: undefined,
+        pdf_path: undefined,
         tariff_snapshot: undefined,
         patrol_snapshot: undefined,
       })
@@ -551,10 +671,10 @@ async function resolveSignerName(
   return "ViorAI";
 }
 
-async function attachGeneratedPdf(
+async function generateOfferPdf(
   supabase: SupabaseClient,
   input: QuickCreateContext
-): Promise<{ storagePath?: string; publicUrl?: string }> {
+): Promise<{ pdfBytes: Uint8Array; fileName: string }> {
   const quoteNumber = input.quoteNumber ?? `AN-${new Date().getFullYear()}-${input.quoteId.slice(0, 6).toUpperCase()}`;
   const signerName = await resolveSignerName(supabase, input.tenantId, input.settings);
   const pdfBytes = await generateQuotePdf({
@@ -594,10 +714,23 @@ async function attachGeneratedPdf(
     customerName: input.customer.companyName,
     projectName: input.project.name,
   });
-  const storagePath = `${input.tenantId}/${input.quoteId}/${fileName}`;
+
+  return { pdfBytes, fileName };
+}
+
+async function storeOfferPdf(
+  supabase: SupabaseClient,
+  input: {
+    tenantId: string;
+    quoteId: string;
+    fileName: string;
+    pdfBytes: Uint8Array;
+  }
+): Promise<{ storagePath?: string; publicUrl?: string }> {
+  const storagePath = `${input.tenantId}/${input.quoteId}/${input.fileName}`;
   const uploadResult = await supabase.storage
     .from("quote-pdfs")
-    .upload(storagePath, pdfBytes, {
+    .upload(storagePath, input.pdfBytes, {
       contentType: "application/pdf",
       upsert: true,
     });
@@ -619,11 +752,35 @@ async function attachGeneratedPdf(
   };
 }
 
-async function updateQuotePipelineData(
+async function attachPdfToOffer(
+  supabase: SupabaseClient,
+  input: { quoteId: string; tenantId: string; storagePath?: string; publicUrl?: string }
+): Promise<void> {
+  const { error } = await supabase
+    .from("quotes")
+    .update({
+      pdf_storage_path: input.storagePath ?? null,
+      pdf_public_url: input.publicUrl ?? null,
+      pdf_path: input.storagePath ?? null,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", input.quoteId)
+    .eq("tenant_id", input.tenantId);
+
+  if (
+    error
+    && !error.message.includes("column quotes.pdf_storage_path does not exist")
+    && !error.message.includes("column quotes.pdf_public_url does not exist")
+    && !error.message.includes("column quotes.pdf_path does not exist")
+  ) {
+    throw new Error(error.message);
+  }
+}
+
+async function updateOfferPipelineData(
   supabase: SupabaseClient,
   input: QuickCreateContext,
-  marginTarget: number | undefined,
-  pdf?: { storagePath?: string; publicUrl?: string }
+  marginTarget: number | undefined
 ): Promise<void> {
   const payload = {
     final_text: input.finalText,
@@ -631,8 +788,6 @@ async function updateQuotePipelineData(
     vat_amount: Number((input.built.totals.totalGross - input.built.totals.totalNet).toFixed(2)),
     total_gross: input.built.totals.totalGross,
     margin_target: Number.isFinite(marginTarget) ? marginTarget : input.mode === "quick" ? 0.2 : null,
-    pdf_storage_path: pdf?.storagePath ?? null,
-    pdf_public_url: pdf?.publicUrl ?? null,
     updated_at: new Date().toISOString(),
   };
 
@@ -649,8 +804,6 @@ async function updateQuotePipelineData(
     && !error.message.includes("column quotes.vat_amount does not exist")
     && !error.message.includes("column quotes.total_gross does not exist")
     && !error.message.includes("column quotes.margin_target does not exist")
-    && !error.message.includes("column quotes.pdf_storage_path does not exist")
-    && !error.message.includes("column quotes.pdf_public_url does not exist")
   ) {
     throw new Error(error.message);
   }
@@ -667,7 +820,7 @@ export async function POST(request: Request) {
     }
 
     const tenantId = await resolveTenantId(supabase);
-    const customer = await findOrCreateCustomer(supabase, tenantId, body.customer);
+    const customer = await upsertCustomer(supabase, tenantId, body.customer);
     const project = await createProject(supabase, tenantId, customer.id, body.project);
     const [settings, tariffDataset] = await Promise.all([
       loadCompanySettings(supabase, tenantId),
@@ -777,7 +930,7 @@ export async function POST(request: Request) {
     const validUntil = new Date(
       Date.now() + Math.max(1, Number.isFinite(validityDays) ? validityDays : 14) * 24 * 60 * 60 * 1000
     ).toISOString().slice(0, 10);
-    const quote = await createQuote({
+    const quote = await createOffer({
       supabase,
       tenantId,
       customerId: customer.id,
@@ -789,6 +942,24 @@ export async function POST(request: Request) {
       finalText,
       aiInputSummary: aiInputSummary ?? undefined,
       marginTarget: shouldUseIntegratedEngine ? targetMargin : undefined,
+      tariffContext: body.offer.tariffContext,
+      state: normalizeText(project.state),
+      wageGroup: body.offer.wageGroup,
+      dutyDurationHours: body.offer.dutyDurationHours,
+      employerFactor: body.offer.employerCostFactor,
+      timeModel,
+      plannerOutput: body.offer.plannerOutput,
+      calculationSnapshot: integratedDraft
+        ? {
+            totals: integratedDraft.totals,
+            tariff: integratedDraft.tariff,
+            techSetup: integratedDraft.techSetup,
+            decisions: integratedDraft.decisions,
+            patrol: integratedDraft.patrol,
+          }
+        : {
+            totals: built.totals,
+          },
       tariffSnapshot: integratedDraft?.tariffSnapshot as Record<string, unknown> | undefined,
       patrolSnapshot: integratedDraft?.patrol as unknown as Record<string, unknown> | undefined,
       validUntil,
@@ -796,7 +967,7 @@ export async function POST(request: Request) {
     });
 
     await saveOfferItems(supabase, tenantId, quote.id, built.lineItems);
-    const pdf = await attachGeneratedPdf(supabase, {
+    const quickCreateContext: QuickCreateContext = {
       tenantId,
       quoteId: quote.id,
       quoteNumber: quote.number,
@@ -810,28 +981,37 @@ export async function POST(request: Request) {
       project,
       built,
       settings,
+    };
+
+    const pdfData = await generateOfferPdf(supabase, quickCreateContext);
+    const pdf = await storeOfferPdf(supabase, {
+      tenantId,
+      quoteId: quote.id,
+      fileName: pdfData.fileName,
+      pdfBytes: pdfData.pdfBytes,
     });
-    await updateQuotePipelineData(supabase, {
-      tenantId,
+
+    await attachPdfToOffer(supabase, {
       quoteId: quote.id,
-      quoteNumber: quote.number,
-      validUntil,
-      mode,
-      serviceType: body.offer.serviceType,
-      generatedText,
-      conceptText,
-      finalText,
-      customer,
-      project,
-      built,
-      settings,
-    }, shouldUseIntegratedEngine ? targetMargin : undefined, pdf);
+      tenantId,
+      storagePath: pdf.storagePath,
+      publicUrl: pdf.publicUrl,
+    });
+
+    await updateOfferPipelineData(
+      supabase,
+      quickCreateContext,
+      shouldUseIntegratedEngine ? targetMargin : undefined
+    );
 
     return Response.json({
       quoteId: quote.id,
       quoteNumber: quote.number,
       customerId: customer.id,
+      customer,
       projectId: project.id,
+      project,
+      status: "draft",
       totals: built.totals,
       generatedText,
       finalText,

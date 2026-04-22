@@ -101,8 +101,20 @@ export default function QuotesPage() {
     router.push(`/quotes/${quoteId}`);
   };
 
-  const handleDownloadPdf = async (quoteId: string) => {
+  const handleDownloadPdf = async (quote: Quote) => {
     try {
+      if (quote.pdfPublicUrl) {
+        const anchor = document.createElement("a");
+        anchor.href = quote.pdfPublicUrl;
+        anchor.target = "_blank";
+        anchor.rel = "noreferrer";
+        anchor.download = `${quote.number ?? quote.id}.pdf`;
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        return;
+      }
+
       const supabase = getSupabaseClient();
       const { data } = await getSupabaseSessionSafe(supabase);
       const token = data.session?.access_token;
@@ -110,7 +122,7 @@ export default function QuotesPage() {
         throw new Error("Session ist abgelaufen. Bitte erneut anmelden.");
       }
 
-      const response = await fetch(`/api/offers/${quoteId}/pdf`, {
+      const response = await fetch(`/api/offers/${quote.id}/pdf`, {
         method: "GET",
         headers: {
           authorization: `Bearer ${token}`,
@@ -125,7 +137,7 @@ export default function QuotesPage() {
       const objectUrl = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
       anchor.href = objectUrl;
-      anchor.download = `angebot_${quoteId}.pdf`;
+      anchor.download = `${quote.number ?? quote.id}.pdf`;
       document.body.appendChild(anchor);
       anchor.click();
       anchor.remove();
@@ -222,7 +234,7 @@ export default function QuotesPage() {
                       <Button size="sm" variant="secondary" onClick={() => void handleOpenInPlanner(quote)}>
                         Angebot bearbeiten
                       </Button>
-                      <Button size="sm" variant="ghost" onClick={() => void handleDownloadPdf(quote.id)}>
+                      <Button size="sm" variant="ghost" onClick={() => void handleDownloadPdf(quote)}>
                         PDF
                       </Button>
                       <Button size="sm" variant="ghost" onClick={() => void handleDuplicateQuote(quote.id)}>

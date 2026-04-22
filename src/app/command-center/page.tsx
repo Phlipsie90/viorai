@@ -29,6 +29,12 @@ interface PlannerOutputInput {
 
 interface CommandCenterFormState {
   companyName: string;
+  contactName: string;
+  street: string;
+  postalCode: string;
+  city: string;
+  email: string;
+  phone: string;
   projectName: string;
   serviceAddress: string;
   serviceType: QuoteServiceType;
@@ -112,8 +118,31 @@ interface EngineDraftResponse {
   };
 }
 
+interface CreateOfferResponse {
+  quoteId: string;
+  quoteNumber?: string | null;
+  status?: string;
+  pdfPublicUrl?: string;
+  customer?: {
+    id: string;
+    companyName: string;
+    contactName?: string;
+    street?: string;
+    postalCode?: string;
+    city?: string;
+    email?: string;
+    phone?: string;
+  };
+}
+
 const INITIAL_FORM: CommandCenterFormState = {
   companyName: "",
+  contactName: "",
+  street: "",
+  postalCode: "",
+  city: "",
+  email: "",
+  phone: "",
   projectName: "Sicherungsprojekt",
   serviceAddress: "",
   serviceType: "objektschutz",
@@ -153,10 +182,15 @@ export default function CommandCenterPage() {
   const [isPreviewLoading, setIsPreviewLoading] = useState(false);
   const [isCreating, setIsCreating] = useState(false);
   const [preview, setPreview] = useState<EngineDraftResponse["draft"] | null>(null);
+  const [createdOffer, setCreatedOffer] = useState<CreateOfferResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const topFieldsValid = useMemo(() => {
     return form.companyName.trim().length > 0
+      && form.contactName.trim().length > 0
+      && form.street.trim().length > 0
+      && form.postalCode.trim().length > 0
+      && form.city.trim().length > 0
       && form.serviceAddress.trim().length > 0
       && form.runtimeMonths > 0
       && form.targetMarginPercent > 0;
@@ -214,7 +248,7 @@ export default function CommandCenterPage() {
 
   const runPreview = async () => {
     if (!topFieldsValid) {
-      setError("Bitte Firmenname, Einsatzort, Laufzeit und Zielmarge ausfüllen.");
+      setError("Bitte Kunde (Name, Ansprechpartner, Straße, PLZ, Ort) sowie Einsatzort, Laufzeit und Zielmarge ausfüllen.");
       return;
     }
 
@@ -246,13 +280,14 @@ export default function CommandCenterPage() {
 
   const createOffer = async () => {
     if (!topFieldsValid) {
-      setError("Bitte Firmenname, Einsatzort, Laufzeit und Zielmarge ausfüllen.");
+      setError("Bitte Kunde (Name, Ansprechpartner, Straße, PLZ, Ort) sowie Einsatzort, Laufzeit und Zielmarge ausfüllen.");
       return;
     }
 
     try {
       setIsCreating(true);
       setError(null);
+      setCreatedOffer(null);
       const token = await withToken();
       const response = await fetch("/api/offers/quick-create", {
         method: "POST",
@@ -263,6 +298,12 @@ export default function CommandCenterPage() {
         body: JSON.stringify({
           customer: {
             companyName: form.companyName,
+            contactName: form.contactName,
+            street: form.street,
+            postalCode: form.postalCode,
+            city: form.city,
+            email: form.email,
+            phone: form.phone,
           },
           project: {
             name: form.projectName,
@@ -289,12 +330,12 @@ export default function CommandCenterPage() {
         }),
       });
 
-      const payload = (await response.json()) as { error?: string; quoteId?: string };
+      const payload = (await response.json()) as { error?: string } & CreateOfferResponse;
       if (!response.ok || !payload.quoteId) {
         throw new Error(payload.error ?? "Angebot konnte nicht erstellt werden.");
       }
 
-      router.push(`/quotes/${payload.quoteId}?source=command-center`);
+      setCreatedOffer(payload);
     } catch (createError) {
       setError(createError instanceof Error ? createError.message : "Angebot konnte nicht erstellt werden.");
     } finally {
@@ -311,6 +352,24 @@ export default function CommandCenterPage() {
           </Field>
           <Field label="Einsatzort" className="min-w-[220px] flex-1">
             <input className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" value={form.serviceAddress} onChange={(event) => setForm((prev) => ({ ...prev, serviceAddress: event.target.value }))} />
+          </Field>
+          <Field label="Ansprechpartner" className="min-w-[220px] flex-1">
+            <input className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" value={form.contactName} onChange={(event) => setForm((prev) => ({ ...prev, contactName: event.target.value }))} />
+          </Field>
+          <Field label="Straße" className="min-w-[220px] flex-1">
+            <input className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" value={form.street} onChange={(event) => setForm((prev) => ({ ...prev, street: event.target.value }))} />
+          </Field>
+          <Field label="PLZ" className="min-w-[120px]">
+            <input className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" value={form.postalCode} onChange={(event) => setForm((prev) => ({ ...prev, postalCode: event.target.value }))} />
+          </Field>
+          <Field label="Ort" className="min-w-[180px]">
+            <input className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" value={form.city} onChange={(event) => setForm((prev) => ({ ...prev, city: event.target.value }))} />
+          </Field>
+          <Field label="E-Mail" className="min-w-[220px] flex-1">
+            <input className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" value={form.email} onChange={(event) => setForm((prev) => ({ ...prev, email: event.target.value }))} />
+          </Field>
+          <Field label="Telefon" className="min-w-[180px]">
+            <input className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" value={form.phone} onChange={(event) => setForm((prev) => ({ ...prev, phone: event.target.value }))} />
           </Field>
           <Field label="Leistungsart" className="min-w-[180px]">
             <select className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white" value={form.serviceType} onChange={(event) => setForm((prev) => ({ ...prev, serviceType: event.target.value as QuoteServiceType }))}>
@@ -449,6 +508,18 @@ export default function CommandCenterPage() {
 
         <article className="rounded-2xl border border-slate-200 bg-white p-4 space-y-3">
           <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-500">Rechts: Angebotsvorschau</h2>
+          <div className="rounded-xl border border-slate-200 p-3 text-sm space-y-1">
+            <p className="font-semibold text-slate-700">Kunde</p>
+            <p>{createdOffer?.customer?.companyName ?? (form.companyName || "—")}</p>
+            <p>{createdOffer?.customer?.contactName ?? (form.contactName || "—")}</p>
+            <p>
+              {[
+                createdOffer?.customer?.street ?? form.street,
+                createdOffer?.customer?.postalCode ?? form.postalCode,
+                createdOffer?.customer?.city ?? form.city,
+              ].filter((part) => !!part).join(", ") || "—"}
+            </p>
+          </div>
           {!preview ? (
             <p className="text-sm text-slate-500">Vorschau wird nach Live-Berechnung angezeigt.</p>
           ) : (
@@ -461,6 +532,24 @@ export default function CommandCenterPage() {
               </div>
               <textarea readOnly className="w-full min-h-[320px] rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm leading-6" value={preview.text.combined} />
             </>
+          )}
+          {createdOffer && (
+            <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm space-y-2">
+              <p className="font-semibold text-emerald-800">Angebot gespeichert ({createdOffer.status ?? "draft"})</p>
+              <p className="text-emerald-700">Angebotsnummer: {createdOffer.quoteNumber ?? createdOffer.quoteId}</p>
+              <div className="flex flex-wrap gap-2">
+                <button type="button" className="rounded-lg border border-emerald-300 px-3 py-1.5 text-emerald-800 hover:bg-emerald-100" onClick={() => router.push(`/quotes/${createdOffer.quoteId}?source=command-center`)}>
+                  Angebotsansicht öffnen
+                </button>
+                {createdOffer.pdfPublicUrl ? (
+                  <a className="rounded-lg border border-emerald-300 px-3 py-1.5 text-emerald-800 hover:bg-emerald-100" href={createdOffer.pdfPublicUrl} target="_blank" rel="noreferrer" download>
+                    PDF herunterladen
+                  </a>
+                ) : (
+                  <span className="rounded-lg border border-slate-200 px-3 py-1.5 text-slate-500">PDF noch nicht verfügbar</span>
+                )}
+              </div>
+            </div>
           )}
         </article>
       </section>

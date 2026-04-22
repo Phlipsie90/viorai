@@ -12,6 +12,9 @@ export interface Customer extends Timestamps {
   tenantId?: string;
   companyName: string;
   contactName?: string;
+  street?: string;
+  postalCode?: string;
+  city?: string;
   email?: string;
   phone?: string;
   address?: string;

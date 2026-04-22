@@ -5,6 +5,9 @@ import { resolveTenantContext } from "@/lib/supabase/tenant-context";
 export interface CustomerDraft {
   companyName: string;
   contactName: string;
+  street?: string;
+  postalCode?: string;
+  city?: string;
   email: string;
   phone: string;
   address: string;
@@ -27,6 +30,9 @@ interface CustomerRow {
   tenant_id: string;
   company_name: string;
   contact_name: string | null;
+  street?: string | null;
+  postal_code?: string | null;
+  city?: string | null;
   email: string | null;
   phone: string | null;
   address: string | null;
@@ -38,7 +44,7 @@ interface CustomerRow {
 
 const SELECTED_CUSTOMER_KEY = "crm-tool.selected-customer-id";
 const CUSTOMER_SELECT_COLUMNS =
-  "id, tenant_id, company_name, contact_name, email, phone, address, billing_address, notes, created_at, updated_at";
+  "id, tenant_id, company_name, contact_name, street, postal_code, city, email, phone, address, billing_address, notes, created_at, updated_at";
 
 function nowIsoTimestamp(): IsoDateTimeString {
   return new Date().toISOString();
@@ -55,14 +61,22 @@ function toInsertPayload(draft: CustomerDraft, tenantId: string) {
     throw new Error("Firmenname ist erforderlich.");
   }
 
+  const street = normalizeOptional(draft.street ?? "");
+  const postalCode = normalizeOptional(draft.postalCode ?? "");
+  const city = normalizeOptional(draft.city ?? "");
+  const formattedAddress = [street, postalCode, city].filter((part) => part && part.trim().length > 0).join(", ");
+
   return {
     tenant_id: tenantId,
     company_name: companyName,
     contact_name: normalizeOptional(draft.contactName),
+    street,
+    postal_code: postalCode,
+    city,
     email: normalizeOptional(draft.email),
     phone: normalizeOptional(draft.phone),
-    address: normalizeOptional(draft.address),
-    billing_address: normalizeOptional(draft.billingAddress),
+    address: normalizeOptional(draft.address) ?? normalizeOptional(formattedAddress),
+    billing_address: normalizeOptional(draft.billingAddress) ?? normalizeOptional(formattedAddress),
     notes: normalizeOptional(draft.notes),
   };
 }
@@ -73,6 +87,9 @@ function mapRowToCustomer(row: CustomerRow): Customer {
     tenantId: row.tenant_id,
     companyName: row.company_name,
     contactName: row.contact_name ?? undefined,
+    street: row.street ?? undefined,
+    postalCode: row.postal_code ?? undefined,
+    city: row.city ?? undefined,
     email: row.email ?? undefined,
     phone: row.phone ?? undefined,
     address: row.address ?? undefined,

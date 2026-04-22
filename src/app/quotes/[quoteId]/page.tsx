@@ -91,6 +91,18 @@ export default function QuoteDetailPage() {
       return;
     }
     try {
+      if (quote?.pdfPublicUrl) {
+        const anchor = document.createElement("a");
+        anchor.href = quote.pdfPublicUrl;
+        anchor.target = "_blank";
+        anchor.rel = "noreferrer";
+        anchor.download = `${quote.number ?? quote.id}.pdf`;
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        return;
+      }
+
       const supabase = getSupabaseClient();
       const { data } = await getSupabaseSessionSafe(supabase);
       const token = data.session?.access_token;
@@ -153,6 +165,9 @@ export default function QuoteDetailPage() {
             <h1 className="text-2xl font-semibold text-slate-900">Angebot {quote.number ?? quote.id.slice(0, 8)}</h1>
             <p className="mt-1 text-sm text-slate-600">
               Kunde: {customer?.companyName ?? "Unbekannt"} | Projekt: {project?.name ?? "Unbekannt"} | Status: {STATUS_LABELS[quote.status]}
+            </p>
+            <p className="mt-1 text-sm text-slate-600">
+              Ansprechpartner: {customer?.contactName ?? "—"} | Adresse: {[customer?.street, customer?.postalCode, customer?.city].filter((part) => !!part).join(", ") || customer?.address || "—"}
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -226,4 +241,3 @@ function formatCurrency(value: number): string {
     currency: "EUR",
   }).format(value);
 }
-

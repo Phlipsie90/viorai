@@ -102,6 +102,14 @@ function normalizeLineItems(input: unknown): QuoteLineItem[] {
     });
 }
 
+function getFileNameForDownload(input: { quoteNumber: string; customerName: string; projectName: string }) {
+  return buildQuotePdfFileName({
+    quoteNumber: input.quoteNumber,
+    customerName: input.customerName,
+    projectName: input.projectName,
+  });
+}
+
 export async function GET(
   request: Request,
   context: { params: Promise<{ quoteId: string }> }
@@ -121,7 +129,7 @@ export async function GET(
     const tenantId = await resolveTenantId(supabase);
     const quoteResult = await supabase
       .from("quotes")
-      .select("id, tenant_id, number, customer_id, project_id, positions, pricing, generated_text, concept_text, final_text, valid_until")
+      .select("id, tenant_id, number, customer_id, project_id, positions, pricing, generated_text, concept_text, final_text, valid_until, pdf_storage_path, pdf_public_url")
       .eq("id", quoteId)
       .eq("tenant_id", tenantId)
       .maybeSingle();
@@ -143,6 +151,30 @@ export async function GET(
       return Response.json({ error: projectResult.error?.message ?? "Projektdaten fehlen." }, { status: 400 });
     }
 
+    const quoteNumber = normalizeText(quote.number as string) || `AN-${new Date().getFullYear()}-${String(quote.id).slice(0, 6).toUpperCase()}`;
+    const customer = customerResult.data as Record<string, unknown>;
+    const project = projectResult.data as Record<string, unknown>;
+    const fileName = getFileNameForDownload({
+      quoteNumber,
+      customerName: normalizeText(customer.company_name as string),
+      projectName: normalizeText(project.name as string),
+    });
+
+    const storedPdfPath = normalizeText(quote.pdf_storage_path as string);
+    if (storedPdfPath) {
+      const stored = await supabase.storage.from("quote-pdfs").download(storedPdfPath);
+      if (!stored.error && stored.data) {
+        const bytes = new Uint8Array(await stored.data.arrayBuffer());
+        return new Response(Buffer.from(bytes), {
+          status: 200,
+          headers: {
+            "content-type": "application/pdf",
+            "content-disposition": `attachment; filename=\"${fileName}\"`,
+          },
+        });
+      }
+    }
+
     const lineItems = normalizeLineItems(quote.positions);
     if (lineItems.length === 0) {
       return Response.json({ error: "Keine Positionen für PDF vorhanden." }, { status: 400 });
@@ -150,9 +182,6 @@ export async function GET(
 
     const pricing = (quote.pricing ?? {}) as Record<string, unknown>;
     const issueDate = new Date().toISOString().slice(0, 10);
-    const quoteNumber = normalizeText(quote.number as string) || `AN-${new Date().getFullYear()}-${String(quote.id).slice(0, 6).toUpperCase()}`;
-    const customer = customerResult.data as Record<string, unknown>;
-    const project = projectResult.data as Record<string, unknown>;
     const company = companyResult.data as Record<string, unknown> | null;
     const pdfBytes = await generateQuotePdf({
       quoteNumber,
@@ -186,11 +215,22 @@ export async function GET(
       signerName: normalizeText(company?.company_name as string) || "ViorAI",
     });
 
-    const fileName = buildQuotePdfFileName({
-      quoteNumber,
-      customerName: normalizeText(customer.company_name as string),
-      projectName: normalizeText(project.name as string),
+    const storagePath = `${tenantId}/${quoteId}/${fileName}`;
+    await supabase.storage.from("quote-pdfs").upload(storagePath, pdfBytes, {
+      contentType: "application/pdf",
+      upsert: true,
     });
+    const publicResult = supabase.storage.from("quote-pdfs").getPublicUrl(storagePath);
+
+    await supabase
+      .from("quotes")
+      .update({
+        pdf_storage_path: storagePath,
+        pdf_public_url: publicResult.data?.publicUrl ?? null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", quoteId)
+      .eq("tenant_id", tenantId);
 
     return new Response(Buffer.from(pdfBytes), {
       status: 200,
