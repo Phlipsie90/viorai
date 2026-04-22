@@ -7,6 +7,7 @@ import {
   calculateSalesPrice,
   resolveTariff,
   resolveTariffContext,
+  resolveNightSurchargePercent,
   type ResolvedTariff,
   type TariffContext,
   type TariffDataset,
@@ -67,6 +68,9 @@ export interface TariffCalculationResult {
   context: TariffContext;
   resolved: ResolvedTariff;
   monthlyHours: number;
+  dayHours: number;
+  nightHours: number;
+  nightSurchargePercent: number;
   laborCostPerHour: number;
   employerCostPerHour: number;
   saleHourlyRate: number;
@@ -74,6 +78,17 @@ export interface TariffCalculationResult {
   targetMargin: number;
   monthlyLaborCost: number;
   monthlySalesValue: number;
+  breakdown: {
+    base_rate: number;
+    employer_factor: number;
+    ag_cost_per_hour: number;
+    margin: number;
+    sales_rate_per_hour: number;
+    total_hours: number;
+    day_hours: number;
+    night_hours: number;
+    monthly_price: number;
+  };
 }
 
 export interface TariffSnapshot {
@@ -87,8 +102,6 @@ export interface TariffSnapshot {
   matchedServiceType: string;
   matchedServiceContext: string;
   matchedWageGroup: string;
-  fallbackApplied: boolean;
-  fallbackReason?: string;
   dutyDurationHours?: number;
   appliedBaseRate: number;
   appliedSurcharges: Array<{
@@ -108,6 +121,20 @@ export interface TariffSnapshot {
   targetMargin: number;
   calculationBasisPerHour: number;
   saleHourlyRate: number;
+  dayHours: number;
+  nightHours: number;
+  nightSurchargePercent: number;
+  breakdown: {
+    base_rate: number;
+    employer_factor: number;
+    ag_cost_per_hour: number;
+    margin: number;
+    sales_rate_per_hour: number;
+    total_hours: number;
+    day_hours: number;
+    night_hours: number;
+    monthly_price: number;
+  };
 }
 
 export interface IntegratedOfferDraft {
@@ -190,41 +217,28 @@ function getTariffServiceType(input: IntegratedOfferInput, context: TariffContex
   }
 }
 
-function getDefaultWageGroup(input: IntegratedOfferInput, context: TariffContext): string {
-  if (input.wageGroup?.trim()) {
-    return input.wageGroup.trim();
+function requireWageGroup(input: IntegratedOfferInput): string {
+  const wageGroup = input.wageGroup?.trim();
+  if (!wageGroup) {
+    throw new Error("wage_group fehlt. Bitte eine gültige Lohngruppe setzen.");
   }
-
-  if (context === "military") {
-    return "BW-A";
-  }
-
-  if (context === "kta") {
-    return "Gruppe C";
-  }
-
-  if (input.serviceType === "leitstelle") {
-    return "NSL-FK";
-  }
-
-  if (input.serviceType === "revierdienst") {
-    return "REV1";
-  }
-
-  return "EG2";
+  return wageGroup;
 }
 
-function getDefaultTimeModelHours(model: TariffTimeModel): number {
-  switch (model) {
-    case "night":
-      return 180;
-    case "twentyfourseven":
-      return 720;
-    case "patrol":
-      return 90;
-    default:
-      return 200;
+export function calculateMonthlyHours(shiftHours: number, model: TariffTimeModel): number {
+  if (!Number.isFinite(shiftHours) || shiftHours <= 0) {
+    throw new Error("shiftHours muss > 0 sein.");
   }
+
+  if (model === "patrol") {
+    return roundMoney(shiftHours * 30);
+  }
+
+  if (model === "twentyfourseven") {
+    return roundMoney((shiftHours * 365) / 12);
+  }
+
+  return roundMoney(shiftHours * 30);
 }
 
 function deriveTechSetup(plannerOutput: PlannerOutputInput | undefined, decisions: string[]): TechSetup {
@@ -268,7 +282,11 @@ function buildTariffResult(input: IntegratedOfferInput, decisions: string[], pat
     wageGroup: input.wageGroup,
   });
   const serviceContext = input.serviceContext?.trim() || getDefaultServiceContext(input.serviceType);
-  const wageGroup = getDefaultWageGroup(input, context);
+  const wageGroup = requireWageGroup(input);
+  const shiftHours = Number.isFinite(input.dutyDurationHours) ? Number(input.dutyDurationHours) : 0;
+  if (shiftHours <= 0) {
+    throw new Error("dutyDurationHours muss gesetzt sein (z. B. 12h).");
+  }
 
   const resolved = resolveTariff({
     dataset: input.tariffDataset,
@@ -284,10 +302,27 @@ function buildTariffResult(input: IntegratedOfferInput, decisions: string[], pat
 
   const monthlyHours = patrol
     ? Math.max(1, roundMoney(patrol.totalHours * Math.max(1, input.patrolInput?.weekdays ?? 30)))
-    : getDefaultTimeModelHours(input.timeModel);
+    : Math.max(1, calculateMonthlyHours(shiftHours, input.timeModel));
+
+  const baseRate = resolved.appliedBaseRate;
+  const nightSurchargePercent = resolveNightSurchargePercent({
+    dataset: input.tariffDataset,
+    tariffSetId: resolved.tariffSet.id,
+    state: input.state,
+    serviceType: resolved.serviceType,
+    baseRate,
+  });
+
+  const dayHours = patrol ? monthlyHours : roundMoney(monthlyHours * 0.7);
+  const nightHours = patrol ? 0 : roundMoney(monthlyHours - dayHours);
+
+  const monthlyBaseCost = roundMoney(
+    (dayHours * baseRate) + (nightHours * baseRate * (1 + nightSurchargePercent))
+  );
+  const weightedBaseRate = monthlyHours > 0 ? roundMoney(monthlyBaseCost / monthlyHours) : baseRate;
 
   const labor = calculateLaborCost({
-    tariffBasisPerHour: resolved.calculationBasisPerHour,
+    tariffBasisPerHour: weightedBaseRate,
     employerCostFactor: Number.isFinite(input.employerCostFactor) ? Number(input.employerCostFactor) : 1.34,
   });
 
@@ -297,23 +332,36 @@ function buildTariffResult(input: IntegratedOfferInput, decisions: string[], pat
   });
 
   decisions.push(`Tarifkontext '${context}' auf Basis ${resolved.tariffSet.title} (${resolved.tariffSet.sourceDate}) angewendet.`);
-  if (resolved.fallbackApplied) {
-    decisions.push(
-      `Tarif-Fallback aktiv: ${resolved.fallbackReason ?? "fehlender Tarifeintrag, Ersatzsatz verwendet."}`
-    );
-  }
+  decisions.push(`Monatsstunden berechnet: ${monthlyHours}h (Schicht ${shiftHours}h, Modell ${input.timeModel}).`);
+  decisions.push(`Zuschlagslogik: ${dayHours}h Tag + ${nightHours}h Nacht mit Nachtzuschlag ${(nightSurchargePercent * 100).toFixed(2)}%.`);
+
+  const monthlySalesValue = roundMoney(sales.salesPricePerHour * monthlyHours);
 
   return {
     context,
     resolved,
     monthlyHours,
+    dayHours,
+    nightHours,
+    nightSurchargePercent,
     laborCostPerHour: labor.laborCostPerHour,
     employerCostPerHour: labor.employerCostPerHour,
     saleHourlyRate: sales.salesPricePerHour,
     employerCostFactor: labor.employerCostFactor,
     targetMargin: sales.targetMargin,
     monthlyLaborCost: roundMoney(labor.employerCostPerHour * monthlyHours),
-    monthlySalesValue: roundMoney(sales.salesPricePerHour * monthlyHours),
+    monthlySalesValue,
+    breakdown: {
+      base_rate: baseRate,
+      employer_factor: labor.employerCostFactor,
+      ag_cost_per_hour: labor.employerCostPerHour,
+      margin: sales.targetMargin,
+      sales_rate_per_hour: sales.salesPricePerHour,
+      total_hours: monthlyHours,
+      day_hours: dayHours,
+      night_hours: nightHours,
+      monthly_price: monthlySalesValue,
+    },
   };
 }
 
@@ -498,8 +546,6 @@ function buildTariffSnapshot(tariff: TariffCalculationResult): TariffSnapshot {
     matchedServiceType: tariff.resolved.matchedServiceType,
     matchedServiceContext: tariff.resolved.matchedServiceContext,
     matchedWageGroup: tariff.resolved.matchedWageGroup,
-    fallbackApplied: tariff.resolved.fallbackApplied,
-    fallbackReason: tariff.resolved.fallbackReason,
     dutyDurationHours: tariff.resolved.dutyDurationHours,
     appliedBaseRate: tariff.resolved.appliedBaseRate,
     appliedSurcharges: tariff.resolved.appliedSurcharges,
@@ -508,6 +554,10 @@ function buildTariffSnapshot(tariff: TariffCalculationResult): TariffSnapshot {
     targetMargin: tariff.targetMargin,
     calculationBasisPerHour: tariff.resolved.calculationBasisPerHour,
     saleHourlyRate: tariff.saleHourlyRate,
+    dayHours: tariff.dayHours,
+    nightHours: tariff.nightHours,
+    nightSurchargePercent: tariff.nightSurchargePercent,
+    breakdown: tariff.breakdown,
   };
 }
 

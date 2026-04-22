@@ -72,11 +72,6 @@ interface EngineDraftResponse {
           title: string;
           sourceDate: string;
         };
-        fallbackApplied: boolean;
-        fallbackReason?: string;
-        matchedServiceContext: string;
-        matchedServiceType: string;
-        matchedWageGroup: string;
         appliedBaseRate: number;
         appliedSurcharges: Array<{
           surchargeType: string;
@@ -128,7 +123,7 @@ const INITIAL_FORM: CommandCenterFormState = {
   timeModel: "day",
   tariffContext: "standard",
   serviceContext: "objektschutz",
-  wageGroup: "EG2",
+  wageGroup: "EG-OBJ",
   dutyDurationHours: 8,
   employerCostFactor: 1.34,
   shiftStartIso: new Date().toISOString().slice(0, 16),
@@ -416,13 +411,6 @@ export default function CommandCenterPage() {
                 <p>Tarifkontext: <span className="font-semibold">{preview.tariff.context}</span></p>
                 <p>Tarifset: <span className="font-semibold">{preview.tariff.resolved.tariffSet.title}</span></p>
                 <p>Version: <span className="font-semibold">{preview.tariff.resolved.tariffSet.sourceDate}</span></p>
-                <p>Fallback: <span className="font-semibold">{preview.tariff.resolved.fallbackApplied ? "Ja" : "Nein"}</span></p>
-                {preview.tariff.resolved.fallbackApplied && (
-                  <p>Ersatzsatz: <span className="font-semibold">{preview.tariff.resolved.matchedServiceContext} / {preview.tariff.resolved.matchedServiceType} / {preview.tariff.resolved.matchedWageGroup}</span></p>
-                )}
-                {preview.tariff.resolved.fallbackApplied && preview.tariff.resolved.fallbackReason && (
-                  <p className="text-amber-700">Hinweis: {preview.tariff.resolved.fallbackReason}</p>
-                )}
                 <p>Basissatz: <span className="font-semibold">{formatCurrency(preview.tariff.resolved.appliedBaseRate)}/h</span></p>
                 <p>Arbeitgeberkosten: <span className="font-semibold">{formatCurrency(preview.tariff.employerCostPerHour)}/h</span></p>
                 <p>Verkaufssatz: <span className="font-semibold">{formatCurrency(preview.tariff.saleHourlyRate)}/h</span></p>

@@ -117,22 +117,12 @@ export interface ResolvedTariff {
   matchedServiceContext: string;
   matchedServiceType: string;
   matchedWageGroup: string;
-  fallbackApplied: boolean;
-  fallbackReason?: string;
   dutyDurationHours?: number;
   appliedBaseRate: number;
   adjustedBaseRate: number;
   appliedSurcharges: AppliedSurcharge[];
   appliedSpecialRules: AppliedSpecialRule[];
   calculationBasisPerHour: number;
-}
-
-interface ResolvedTariffEntry {
-  tariffContext: TariffContext;
-  set: TariffSetRow;
-  entry: TariffEntryRow;
-  fallbackApplied: boolean;
-  fallbackReason?: string;
 }
 
 export interface LaborCostResult {
@@ -242,12 +232,15 @@ export function resolveTariffEntry(input: ResolveTariffInput): {
   tariffContext: TariffContext;
   set: TariffSetRow;
   entry: TariffEntryRow;
-  fallbackApplied: boolean;
-  fallbackReason?: string;
 } {
   const tariffContext = resolveTariffContext(input);
   const state = normalizeState(input.state);
   const now = resolveShiftDate(input);
+  const requestedWageGroup = input.wageGroup?.trim();
+
+  if (!requestedWageGroup) {
+    throw new Error("wage_group ist erforderlich und darf nicht leer sein.");
+  }
 
   const activeSets = input.dataset.sets
     .filter((set) => set.is_active && set.category === tariffContext && inValidity(set, now))
@@ -259,10 +252,9 @@ export function resolveTariffEntry(input: ResolveTariffInput): {
 
   const selectedSet = activeSets[0];
   const duration = Number.isFinite(input.dutyDurationHours) ? Number(input.dutyDurationHours) : null;
-
   const requestedServiceContext = normalizeKey(input.serviceContext);
   const requestedServiceType = normalizeKey(input.serviceType);
-  const requestedWageGroup = normalizeKey(input.wageGroup);
+  const normalizedRequestedWageGroup = normalizeKey(requestedWageGroup);
 
   const bySet = input.dataset.entries.filter((entry) => entry.tariff_set_id === selectedSet.id);
   const stateCandidates = bySet.filter((entry) => entry.state === state || entry.state === "all");
@@ -277,111 +269,34 @@ export function resolveTariffEntry(input: ResolveTariffInput): {
     return duration >= min && duration < max;
   };
 
-  const sortCandidates = (entries: TariffEntryRow[]): TariffEntryRow[] =>
-    [...entries].sort((a, b) => {
-      const stateRankA = a.state === state ? 0 : 1;
-      const stateRankB = b.state === state ? 0 : 1;
-      if (stateRankA !== stateRankB) {
-        return stateRankA - stateRankB;
-      }
-      return a.sort_order - b.sort_order;
-    });
+  const exactCandidates = stateCandidates.filter((entry) =>
+    normalizeKey(entry.service_context) === requestedServiceContext
+    && normalizeKey(entry.service_type) === requestedServiceType
+    && normalizeKey(entry.wage_group) === normalizedRequestedWageGroup
+  );
+  const matchingDuration = exactCandidates.filter(isDurationMatch);
+  const finalCandidates = matchingDuration.length > 0 ? matchingDuration : exactCandidates;
 
-  const pickBest = (entries: TariffEntryRow[]): TariffEntryRow | null => {
-    if (entries.length === 0) {
-      return null;
+  const selectedEntry = [...finalCandidates].sort((a, b) => {
+    const stateRankA = a.state === state ? 0 : 1;
+    const stateRankB = b.state === state ? 0 : 1;
+    if (stateRankA !== stateRankB) {
+      return stateRankA - stateRankB;
     }
-    const durationMatches = entries.filter(isDurationMatch);
-    const candidates = durationMatches.length > 0 ? durationMatches : entries;
-    return sortCandidates(candidates)[0] ?? null;
-  };
+    return a.sort_order - b.sort_order;
+  })[0];
 
-  const findCandidate = (filter: (entry: TariffEntryRow) => boolean): TariffEntryRow | null =>
-    pickBest(stateCandidates.filter(filter));
-
-  const exact = findCandidate((entry) =>
-    normalizeKey(entry.service_context) === requestedServiceContext
-    && normalizeKey(entry.service_type) === requestedServiceType
-    && normalizeKey(entry.wage_group) === requestedWageGroup
-  );
-
-  const finalize = (entry: TariffEntryRow, fallbackApplied: boolean, fallbackReason?: string): ResolvedTariffEntry => ({
-    tariffContext,
-    set: selectedSet,
-    entry,
-    fallbackApplied,
-    fallbackReason,
-  });
-
-  if (exact) {
-    return finalize(exact, false);
-  }
-
-  const sameServiceAnyWage = findCandidate((entry) =>
-    normalizeKey(entry.service_context) === requestedServiceContext
-    && normalizeKey(entry.service_type) === requestedServiceType
-  );
-  if (sameServiceAnyWage) {
-    return finalize(
-      sameServiceAnyWage,
-      true,
-      `Fallback aktiviert: fehlende Lohngruppe '${input.wageGroup}', stattdessen '${sameServiceAnyWage.wage_group}'.`
+  if (!selectedEntry) {
+    throw new Error(
+      `Kein Tarifeintrag gefunden (Kontext=${tariffContext}, Bundesland=${state}, Service=${input.serviceType}, Gruppe=${requestedWageGroup}).`
     );
   }
 
-  if (tariffContext === "standard") {
-    const standardFallbackChains: Record<string, Array<{ serviceContext: string; serviceType: string; label: string }>> = {
-      fluechtlingsunterkunft: [
-        { serviceContext: "objektschutz", serviceType: "separatwachdienst", label: "Objektschutz/Separatwachdienst" },
-      ],
-      veranstaltungsdienst: [
-        { serviceContext: "objektschutz", serviceType: "separatwachdienst", label: "Objektschutz/Separatwachdienst" },
-      ],
-      nrz_nsl: [
-        { serviceContext: "werkschutz", serviceType: "gssk", label: "Werkschutz/GSSK" },
-        { serviceContext: "werkschutz", serviceType: "fachkraft_schutz_sicherheit", label: "Fachkraft Schutz und Sicherheit" },
-        { serviceContext: "objektschutz", serviceType: "separatwachdienst", label: "Objektschutz/Separatwachdienst" },
-      ],
-      revierwachdienst: [
-        { serviceContext: "objektschutz", serviceType: "separatwachdienst", label: "Objektschutz/Separatwachdienst" },
-      ],
-    };
-
-    const chain = standardFallbackChains[requestedServiceType] ?? [];
-    for (const step of chain) {
-      const normalizedStepContext = normalizeKey(step.serviceContext);
-      const normalizedStepService = normalizeKey(step.serviceType);
-
-      const withRequestedWage = findCandidate((entry) =>
-        normalizeKey(entry.service_context) === normalizedStepContext
-        && normalizeKey(entry.service_type) === normalizedStepService
-        && normalizeKey(entry.wage_group) === requestedWageGroup
-      );
-      if (withRequestedWage) {
-        return finalize(
-          withRequestedWage,
-          true,
-          `Fallback aktiviert: '${input.serviceType}' fehlt in ${state}, genutzt wurde '${step.label}' (${withRequestedWage.wage_group}).`
-        );
-      }
-
-      const withAnyWage = findCandidate((entry) =>
-        normalizeKey(entry.service_context) === normalizedStepContext
-        && normalizeKey(entry.service_type) === normalizedStepService
-      );
-      if (withAnyWage) {
-        return finalize(
-          withAnyWage,
-          true,
-          `Fallback aktiviert: '${input.serviceType}' fehlt in ${state}, genutzt wurde '${step.label}' mit Lohngruppe '${withAnyWage.wage_group}'.`
-        );
-      }
-    }
-  }
-
-  throw new Error(
-    `Kein Tarifeintrag gefunden (Kontext=${tariffContext}, Bundesland=${state}, Service=${input.serviceType}, Gruppe=${input.wageGroup}).`
-  );
+  return {
+    tariffContext,
+    set: selectedSet,
+    entry: selectedEntry,
+  };
 }
 
 function isSunday(date: Date): boolean {
@@ -544,7 +459,7 @@ export function calculateSalesPrice(input: {
   targetMargin: number;
 }): SalesPriceResult {
   const margin = Number.isFinite(input.targetMargin) ? Math.min(0.65, Math.max(0.05, input.targetMargin)) : 0.22;
-  const salesPricePerHour = roundMoney(input.employerCostPerHour / (1 - margin));
+  const salesPricePerHour = roundMoney(input.employerCostPerHour * (1 + margin));
 
   return {
     salesPricePerHour,
@@ -554,27 +469,9 @@ export function calculateSalesPrice(input: {
 
 export function resolveTariff(input: ResolveTariffInput): ResolvedTariff {
   const selected = resolveTariffEntry(input);
-  const shiftDate = resolveShiftDate(input);
-  const surcharges = resolveApplicableSurcharges({
-    dataset: input.dataset,
-    selectedSet: selected.set,
-    state: input.state,
-    serviceType: input.serviceType,
-    shiftDate,
-    baseRate: selected.entry.hourly_rate,
-  });
-  const rules = applySpecialRules({
-    dataset: input.dataset,
-    selectedSet: selected.set,
-    state: input.state,
-    request: input,
-  });
-
-  const basis = calculateTariffBase({
-    baseRate: selected.entry.hourly_rate,
-    surcharges,
-    specialRules: rules,
-  });
+  const surcharges: AppliedSurcharge[] = [];
+  const rules: AppliedSpecialRule[] = [];
+  const basis = roundMoney(selected.entry.hourly_rate);
 
   return {
     tariffContext: selected.tariffContext,
@@ -592,8 +489,6 @@ export function resolveTariff(input: ResolveTariffInput): ResolvedTariff {
     matchedServiceContext: selected.entry.service_context,
     matchedServiceType: selected.entry.service_type,
     matchedWageGroup: selected.entry.wage_group,
-    fallbackApplied: selected.fallbackApplied,
-    fallbackReason: selected.fallbackReason,
     dutyDurationHours: Number.isFinite(input.dutyDurationHours) ? Number(input.dutyDurationHours) : undefined,
     appliedBaseRate: roundMoney(selected.entry.hourly_rate),
     adjustedBaseRate: basis,
@@ -601,6 +496,40 @@ export function resolveTariff(input: ResolveTariffInput): ResolvedTariff {
     appliedSpecialRules: rules,
     calculationBasisPerHour: basis,
   };
+}
+
+export function resolveNightSurchargePercent(input: {
+  dataset: TariffDataset;
+  tariffSetId: string;
+  state: string;
+  serviceType: string;
+  baseRate: number;
+}): number {
+  const normalizedState = normalizeState(input.state);
+  const normalizedServiceType = normalizeKey(input.serviceType);
+
+  const candidates = input.dataset.surcharges
+    .filter((entry) => entry.tariff_set_id === input.tariffSetId)
+    .filter((entry) => entry.surcharge_type === "night")
+    .filter((entry) => entry.state === normalizedState || entry.state === "all")
+    .filter((entry) => !entry.applies_to_service_type || normalizeKey(entry.applies_to_service_type) === normalizedServiceType);
+
+  if (candidates.length === 0) {
+    return 0;
+  }
+
+  const normalizedPercents = candidates.map((entry) => {
+    if (entry.mode === "percent") {
+      return entry.value / 100;
+    }
+    if (input.baseRate <= 0) {
+      return 0;
+    }
+    return entry.value / input.baseRate;
+  });
+
+  const maxPercent = Math.max(...normalizedPercents, 0);
+  return Number.isFinite(maxPercent) ? maxPercent : 0;
 }
 
 export async function loadTariffDataset(supabase: SupabaseClient): Promise<TariffDataset> {
